@@ -8,7 +8,7 @@ import logging
 from PIL import Image
 import matplotlib.pyplot as plt
 import cv2
-import pygame
+
 
 DIRECTIONS = np.array([
     [0, 0, 1],

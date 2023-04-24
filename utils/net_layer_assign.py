@@ -124,7 +124,7 @@ def bhpsogwo_solver(cross_relation, layer_max=2):
 
 def evaluate(net_layers, cross_relation):
     net_num = cross_relation.shape[0]
-    same_layer_flag = np.zeros((net_num, net_num), dtype=np.bool)  # net之间是否同一层
+    same_layer_flag = np.zeros((net_num, net_num), dtype=bool)  # net之间是否同一层
     for i in range(net_num - 1):
         same_layer_flag[i] = net_layers == net_layers[i]
     same_layer_flag = np.tril(same_layer_flag, -1)
@@ -136,7 +136,7 @@ def run():
     net_num = 100
     cross_relation = np.random.randint(0, 2, (net_num, net_num))
     cross_relation = cross_relation + cross_relation.T
-    cross_relation = np.array(cross_relation, dtype=np.bool)
+    cross_relation = np.array(cross_relation, dtype=bool)
     for i in range(net_num):
         cross_relation[i, i] = False
 

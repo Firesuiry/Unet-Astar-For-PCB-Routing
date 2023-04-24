@@ -1,10 +1,9 @@
 // Initiate a canvas instance
 var canvas = new fabric.Canvas("canvas");
-canvas.setWidth(3000);
-canvas.setHeight(3000);
 
 var data = undefined;
 var display_layer = 0;
+var pin_bind = {};
 
 function get_data() {
     fetch('http://127.0.0.1:5000/ ').then(res => {
@@ -22,11 +21,52 @@ function display_data() {
         return
     }
 
+    canvas.setWidth(data.max_x);
+    canvas.setHeight(data.max_y);
+
+    for (var i = 0; i < data.steiner_nets.length; i++) {
+        var net = data.steiner_nets[i]
+        if (net.path === undefined) {
+            continue
+        } else {
+            var path = net.path
+            var points = []
+            for (var j = 0; j < path.length; j++) {
+                var point = path[j]
+                points.push({
+                    x: point[0],
+                    y: point[1]
+                })
+                // points.push(point[0])
+                // points.push(point[1])
+            }
+            var element = new fabric.Polyline(points, {
+                // fill: 'white',
+                stroke: 'green',
+                opacity: 1,
+                // lockMovementX: true,
+                // lockMovementY: true,
+            });
+            element.id = i
+            element.tp = 'net'
+            element.on("mouseover", (e) => {
+                console.log(e.target.tp + e.target.id.toString() + ' mouseover')
+                e.target.set("opacity", 0.5);
+                canvas.renderAll();
+            })
+            element.on("mouseout", (e) => {
+                e.target.set("opacity", 1);
+            })
+            canvas.add(element);
+        }
+
+    }
+
     for (var i = 0; i < data.pins.length; i++) {
         var pin = data.pins[i]
         var shape = pin['shape']
-        padstack = data.padstacks[shape][display_layer+1]
-        console.log(padstack)
+        padstack = data.padstacks[shape][display_layer + 1]
+        // console.log(padstack)
         if (padstack === undefined) {
             continue
         } else {
@@ -50,7 +90,7 @@ function display_data() {
                     originX: 'center',
                     originY: 'center'
                 });
-                console.log(x,y,radius);
+                // console.log(x, y, radius);
                 canvas.add(element);
             } else if (padstack['shape'] === 'polygon') {
                 continue
@@ -67,8 +107,11 @@ function display_data() {
                 });
                 canvas.add(element);
             }
-            element.on("mouseover", () => {
-                console.log('pin' + i.toString() + ' mouseover')
+            element.id = i
+            element.tp = 'pin'
+            element.on("mouseover", (e) => {
+                console.log(e.target);
+                console.log(element.tp + e.target.id.toString() + ' mouseover')
                 element.set("opacity", 1);
                 canvas.renderAll();
             });
@@ -98,7 +141,7 @@ var triangle = new fabric.Polygon(points, {
 });
 
 // Adding it to the canvas
-canvas.add(triangle);
+// canvas.add(triangle);
 
 // Using mouseover event
 triangle.on("mouseover", () => {

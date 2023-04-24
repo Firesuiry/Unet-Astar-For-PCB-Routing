@@ -108,7 +108,7 @@ class BaseSolver:
         # 标记某条线是否经过某区域
         self.net_flags = None
         self.net_flag_details = {}
-        self.cross_relation = np.zeros((len(self.steiner_nets), len(self.steiner_nets)), dtype=np.bool)
+        self.cross_relation = np.zeros((len(self.steiner_nets), len(self.steiner_nets)), dtype=bool)
         self.net_assemble_flag = np.zeros((len(self.steiner_nets), len(self.steiner_nets)), dtype=float) + 1e9
         self.net_assemble_check()
         for i in range(len(self.steiner_nets)):
