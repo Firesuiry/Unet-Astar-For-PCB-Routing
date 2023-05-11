@@ -13,6 +13,7 @@ from utils.critic_path import key_path2path, path2key_path
 from utils.net_flag import update_net_flag
 from utils.net_layer_assign import layer_assign
 from multiprocessing import shared_memory
+from solver.astar.multilayer_astar import MazeSolver as MultiLayerAstar
 
 NET_FLAG_RESOLUTION = 10
 Infinite = float("inf")
@@ -97,6 +98,7 @@ class BaseSolver:
         self.pins = copy.deepcopy(self.problem.pins)
         self.padstacks = self.problem.padstacks
         self.nets = self.problem.nets
+        self.cross_punish = 0
 
         self.steiner_nets = []
         self.pending_nets = []
@@ -140,60 +142,65 @@ class BaseSolver:
             for kk, vv in v.items():
                 vv['detail_p'] = [math.ceil(d / resolution) for d in vv['detail']]
 
-        for net in self.steiner_nets:
-            old_resolution = net.get('resolution', 1)
-            if net.get('path'):
-                net['path'] = [(int(x * old_resolution / resolution), int(y * old_resolution / resolution))
-                               for x, y in net['path']]
-                net['resolution'] = resolution
-                start = (self.pins[net['pins'][0]]['x'], self.pins[net['pins'][0]]['y'])
-                if net['path'][0] != start:
-                    net['path'].insert(0, start)
-                end = (self.pins[net['pins'][1]]['x'], self.pins[net['pins'][1]]['y'])
-                if net['path'][-1] != end:
-                    net['path'].append(end)
         self.generate_obstacle()
+        for i in range(len(self.steiner_nets)):
+            self.net_refine(i)
         self.generate_net_flag()
 
     def route(self, net_id, **kwargs):
         i = net_id
         old_index = self.steiner_nets[i]['old_index']
-        foundPath = self.net_route(i, **kwargs)
+        foundPath = self.net_route(i, cross_punish=self.cross_punish, **kwargs)
         # 更新到敏感列表上
         # self.net_flags[0, :, :, old_index] = False
         # self.net_flag_details[old_index].clear()
         if foundPath:
+            foundPath = key_path2path(foundPath)
             key_path = path2key_path(foundPath)
             update_net_flag(resolution=NET_FLAG_RESOLUTION, net_flags=self.net_flags,
                             net_flag_details=self.net_flag_details, net_id=old_index, path=foundPath,
-                            old_index=old_index, layer_id=self.steiner_nets[i].get('layer_id', 0))
+                            old_index=old_index)
             self.steiner_nets[i]['path'] = key_path
             self.steiner_nets[i]['resolution'] = self.resolution
+        self.save_data()
+
+    def resolution_solve(self, resolution=1, cross_punish=0):
+        logging.info(f'开始分辨率为{resolution},惩罚为{cross_punish}的解算')
+        self.resolution_change(resolution)
+        self.cross_check()
+        self.cross_punish = cross_punish
+        for i in self.pending_nets:
+            # if i != 17:
+            #     continue
+            self.route(i)
+        self.cross_check()
+        ...
 
     def solve(self):
-        self.resolution_change(8)
-        for i in range(len(self.steiner_nets)):
-            self.route(i, cross_punish=10)
-        self.generate_net_flag()
-        if self.cross_check():
-            return
-        self.net_layer_assign()
-        for i in range(len(self.steiner_nets)):
-            self.route(i, cross_punish=100)
-        self.resolution_change(8)
-
-        for i in self.pending_nets:
-            self.route(i, cross_punish=100)
-        self.generate_net_flag()
-        if self.cross_check():
-            return
-        self.net_layer_assign()
-        self.cross_check()
-        for i in self.pending_nets:
-            self.route(i, cross_punish=100)
-        self.generate_net_flag()
-        if self.cross_check():
-            return
+        # self.resolution_solve(512, 0)
+        # self.resolution_solve(128, 10)
+        # self.resolution_solve(32, 30)
+        self.resolution_solve(8, 100)
+        ...
+        # if self.cross_check():
+        #     return
+        # self.net_layer_assign()
+        # for i in range(len(self.steiner_nets)):
+        #     self.route(i, cross_punish=100)
+        # self.resolution_change(8)
+        #
+        # for i in self.pending_nets:
+        #     self.route(i, cross_punish=100)
+        # self.generate_net_flag()
+        # if self.cross_check():
+        #     return
+        # self.net_layer_assign()
+        # self.cross_check()
+        # for i in self.pending_nets:
+        #     self.route(i, cross_punish=100)
+        # self.generate_net_flag()
+        # if self.cross_check():
+        #     return
         # self.resolution_change(8)
         # for i in self.pending_nets:
         #     self.route(i, cross_punish=100)
@@ -201,23 +208,27 @@ class BaseSolver:
         # self.resolution_change(2)
 
     def cross_check(self):
+        self.save_data()
+        self.generate_net_flag()
         logging.info('检测是否有重叠')
         need_remove = []
         line_width = int((self.line_width + self.clearance) / self.resolution)
-        # for net_id in self.pending_nets:
+        logging.debug(f'line_width={line_width}')
         for net_id in range(len(self.steiner_nets)):
             net = self.steiner_nets[net_id]
             old_index = net['old_index']
-            layer_id = net.get('layer_id', 0)
+            logging.debug(f'开始检测net{net_id}是否有重叠')
             if net.get('path'):
                 cross = False
                 for point in key_path2path(net['path']):
-                    x, y = point
+                    layer_id, x, y = point
                     min_distance = Infinite
                     flagx0, flagy0 = int(x / NET_FLAG_RESOLUTION), int(y / NET_FLAG_RESOLUTION)
                     for i in range(9):
                         flagx = flagx0 + NINE_DIRECTIONS[i][0]
                         flagy = flagy0 + NINE_DIRECTIONS[i][1]
+                        if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
+                            continue
                         for neighbor_net in np.where(self.net_flags[layer_id, flagx, flagy, :])[0]:
                             if old_index == neighbor_net:
                                 continue
@@ -226,31 +237,27 @@ class BaseSolver:
                             for d in neighbor_points:
                                 point = d['point']
                                 point_net_id = d['net_id']
-                                distance = math.hypot(x - point[0], y - point[1])
-                                if distance < line_width:
+                                distance = math.hypot(x - point[1], y - point[2])
+                                if distance <= line_width:
+                                    logging.info(f'线{net_id}重叠 交点{point}|{(layer_id,x,y)} 距离{distance}|{line_width}')
                                     cross = True
                                 if distance < min_distance:
                                     min_distance = distance
-                            _min_distance = min_distance
-                        # self.cross_relation[net_id, neighbor_net] = True
+                logging.debug(f'线{net_id}重叠{cross}')
                 net['cross'] = cross
                 if not cross:
-                    # 检查是否真的没有重叠
-                    # for net_id2 in range(len(self.steiner_nets)):
-                    #     if self.steiner_nets[net_id]['old_index'] == self.steiner_nets[net_id2]['old_index']:
-                    #         continue
-                    #     result = self.cross_point_check(net_id, net_id2)
-                    #     if result:
-                    #         logging.error(f'线{net_id}检测到重叠 对象{net_id2}')
                     net['cross'] = False
                     need_remove.append(net_id)
-                    logging.info(f'线{net_id}完成')
+                    logging.debug(f'线{net_id}完成')
+                else:
+                    if net_id not in self.pending_nets:
+                        logging.debug(f'线{net_id}重叠 加入待完成列表')
+                        self.pending_nets.append(net_id)
+        logging.debug(f'need_remove={need_remove}')
         for net_id in need_remove:
             if net_id in self.pending_nets:
                 self.pending_nets.remove(net_id)
-            else:
-                logging.warning(f'线{net_id}不在待完成列表中')
-        logging.info(f'剩余{len(self.pending_nets)}条线未完成')
+        logging.info(f'剩余{len(self.pending_nets)}条线未完成 {self.pending_nets[:20]}')
         if len(self.pending_nets) == 0:
             logging.info('所有线完成')
             return True
@@ -291,20 +298,19 @@ class BaseSolver:
 
     def generate_net_flag(self):
         logging.info('生成网线标记')
-        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.problem.max_x / NET_FLAG_RESOLUTION),
-                                   math.ceil(self.problem.max_y / NET_FLAG_RESOLUTION),
+        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.max_x / NET_FLAG_RESOLUTION),
+                                   math.ceil(self.max_y / NET_FLAG_RESOLUTION),
                                    len(self.nets)), dtype=bool)
         for i in range(len(self.nets)):
             self.net_flag_details[i].clear()
         for i in range(len(self.steiner_nets)):
             old_index = self.steiner_nets[i]['old_index']
-            layer_id = self.steiner_nets[i].get('layer_id', 0)
             if not self.steiner_nets[i].get('path'):
                 continue
             path = key_path2path(self.steiner_nets[i]['path'])
             update_net_flag(resolution=NET_FLAG_RESOLUTION, net_flags=self.net_flags,
                             net_flag_details=self.net_flag_details, net_id=old_index, path=path,
-                            old_index=old_index, layer_id=layer_id)
+                            old_index=old_index)
 
     def generate_obstacle(self):
         logging.info('生成障碍物')
@@ -402,7 +408,6 @@ class BaseSolver:
         self.shm.buf[:8] = data_len.tobytes()
         self.shm.buf[8:8 + data_len] = binary_data
 
-
     def display(self):
         for layer in range(self.layer_num):
             img = np.zeros(((self.max_x + 1), (self.max_y + 1), 3), dtype=np.uint8)
@@ -416,7 +421,7 @@ class BaseSolver:
                 foundPath = net.get('path')
                 if foundPath:
                     path = key_path2path(foundPath)
-                    for x, y in path:
+                    for layer_id, x, y in path:
                         x0 = x - w if x >= w else x
                         x1 = x + w if x <= self.max_x - w else x
                         y0 = y - w if y >= w else y
@@ -468,36 +473,72 @@ class BaseSolver:
         cv2.imwrite(file_name, mat270)
         logging.info(f'画图结束 保存为{file_name}')
 
+    def get_solver(self, **kwargs):
+        return MultiLayerAstar(**kwargs)
+
     def net_route(self, net_id, **kwargs):
-        logging.info(f'开始布线 id:{net_id}')
+        logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)}')
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
-        ori_position = (self.pins[pin0]['x'], self.pins[pin0]['y'])
-        target_pos = (self.pins[pin1]['x'], self.pins[pin1]['y'])
-
+        ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
+        target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
         # A*算法
-        _solver = MazeSolver(self.max_x, self.max_y, self, old_index=old_index, net_id=net_id,
-                             layer_id=net.get('layer', 0), **kwargs)
+        _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
+                                  layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
+                                  end_layers=self.pins[pin1]['layers'],
+                                  line_width=(self.line_width + self.clearance) / self.resolution, **kwargs)
+        # TODO：跨层情况下，对平面方向不连续的方向是否可以裁剪
         _found_path = _solver.astar(ori_position, target_pos)
-        foundPath = list(_found_path) if _found_path else None
+        if _found_path:
+            foundPath = list(_found_path)
+            # 修改第一个点的层
+            for layer in self.pins[pin0]['layers']:
+                if layer == foundPath[1][0]:
+                    foundPath[0] = (layer, foundPath[0][1], foundPath[0][2])
+        else:
+            foundPath = None
+
         return foundPath
 
     def net_refine(self, net_id, **kwargs):  # TODO: 低分辨率映射到高分辨率
-        logging.info(f'开始优化 id:{net_id}')
         net = self.steiner_nets[net_id]
-        available_area = np.zeros((self.max_x + 1, self.max_y + 1), dtype=np.uint8)
+        available_area = np.zeros((self.layer_num, self.max_x + 1, self.max_y + 1), dtype=np.uint8)
+        # 生成可用区域
         old_resolution, target_resolution = net.get('resolution'), self.resolution
+        if old_resolution is None:
+            # logging.warning(f'网络{net_id}没有分辨率信息')
+            return
+        if old_resolution <= target_resolution:
+            logging.warning(f'网络{net_id}分辨率过低 old:{old_resolution} target:{target_resolution}')
+            return
+        if not net.get('path'):
+            logging.warning(f'网络{net_id}没有路径信息')
+            return
+        logging.info(f'开始优化 id:{net_id}')
+        multi_rate = int(old_resolution / target_resolution)
+        path = key_path2path(net['path'])
+        for layer, x, y in path:
+            new_x = x * multi_rate
+            new_y = y * multi_rate
+            available_area[layer, new_x:new_x + multi_rate, new_y:new_y + multi_rate] = 1
+
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
 
-        ori_position = (self.pins[pin0]['x'], self.pins[pin0]['y'])
-        target_pos = (self.pins[pin1]['x'], self.pins[pin1]['y'])
+        ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
+        target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
 
         # A*算法
-        _solver = MazeSolver(self.max_x, self.max_y, self, old_index=old_index, net_id=net_id, **kwargs)
+        _solver = MultiLayerAstar(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
+                                  layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
+                                  end_layers=self.pins[pin1]['layers'], available_range=available_area,
+                                  cross_punish=0, **kwargs)
         _found_path = _solver.astar(ori_position, target_pos)
         foundPath = list(_found_path) if _found_path else None
+        if foundPath:
+            net['path'] = path2key_path(foundPath)
+            net['resolution'] = target_resolution
         return foundPath
 
     def steiner_tree_net_divide(self):
@@ -579,100 +620,3 @@ class BaseSolver:
                     print(f'{net_id1} and {net_id2} cross at {p1}')
                     return True
         return False
-
-
-class MazeSolver(AStar):
-    """sample use of the astar algorithm. In this exemple we work on a maze made of ascii characters,
-    and a 'node' is just a (x,y) tuple that represents a reachable position"""
-
-    def __init__(self, width, height, solver: BaseSolver, old_index, net_id, layer_id=0, available_range=None,
-                 **kwargs):
-        self.width = width
-        self.height = height
-        self.solver = solver
-        self.old_index = old_index
-        self.net_id = net_id
-        self.net_flags = solver.net_flags
-        self.net_flag_details = solver.net_flag_details
-        self.layer_id = layer_id
-        self.available_range = kwargs.get('available_range', None)
-        self.cross_punish = kwargs.get('cross_punish', 10)
-
-    def heuristic_cost_estimate(self, n1, n2):
-        """computes the 'direct' distance between two (x,y) tuples"""
-        (x1, y1) = n1
-        (x2, y2) = n2
-        distance = [abs(x1 - x2), abs(y1 - y2)]
-        return max(distance) + (math.sqrt(2) - 1) * min(distance)
-
-    def distance_between(self, n1, n2):
-        """this method always returns 1, as two 'neighbors' are always adajcent"""
-        # 欧式距离
-        (x1, y1) = n1.data
-        (x2, y2) = n2.data
-        gscore = math.hypot(x2 - x1, y2 - y1)
-
-        # 障碍物
-        l = [-1, self.old_index]
-        if self.solver.obstacle[self.layer_id, x1, y1] not in l or self.solver.obstacle[self.layer_id, x2, y2] not in l:
-            gscore += 100
-        # 可行范围
-        if self.available_range and self.available_range[self.layer_id, x2, y2] == 0:
-            gscore += 100
-
-        # 拐弯
-        if n1.came_from:
-            (x0, y0) = n1.came_from.data
-            if x2 + x0 == x1 and y2 + y0 == y1:
-                pass
-            else:
-                gscore += 0.5
-
-        # 交叉
-        min_distance = Infinite
-        flagx0, flagy0 = int(x2 / NET_FLAG_RESOLUTION), int(y2 / NET_FLAG_RESOLUTION)
-        for i in range(9):
-            flagx = flagx0 + NINE_DIRECTIONS[i][0]
-            flagy = flagy0 + NINE_DIRECTIONS[i][1]
-            for neighbor_net in np.where(self.net_flags[self.layer_id, flagx, flagy, :])[0]:
-                if neighbor_net == self.old_index:
-                    continue
-                for d in self.net_flag_details[neighbor_net][(self.layer_id, flagx, flagy)]:
-                    point = d['point']
-                    distance = math.hypot(x2 - point[0], y2 - point[1])
-                    if distance < min_distance:
-                        min_distance = distance
-        line_width = 2.5
-        if min_distance < line_width:
-            gscore += self.cross_punish * (1 - (abs(min_distance) / line_width) ** 0.3)
-
-        return gscore
-
-    def neighbors(self, node):
-        """ for a given coordinate in the maze, returns up to 4 adjacent(north,east,south,west)
-            nodes that can be reached (=any adjacent coordinate that is not a wall)
-        """
-        neighbors = []
-        if node.came_from is None:
-            for d in DIRECTIONS:
-                neighbor = (node.data[0] + d[0], node.data[1] + d[1])
-                if 0 <= neighbor[0] < self.width and 0 <= neighbor[1] < self.height:
-                    neighbors.append(neighbor)
-        else:
-            direction = (node.data[0] - node.came_from.data[0], node.data[1] - node.came_from.data[1])
-            n_neighbors = [(node.data[0] + direction[0], node.data[1] + direction[1])]
-            if direction[0] != 0 and direction[1] != 0:
-                n_neighbors.append((node.data[0], node.data[1] + direction[1]))
-                n_neighbors.append((node.data[0] + direction[0], node.data[1]))
-            else:
-                if direction[0] == 0:
-                    n_neighbors.append((node.data[0] + 1, node.data[1] + direction[1]))
-                    n_neighbors.append((node.data[0] - 1, node.data[1] + direction[1]))
-                else:
-                    n_neighbors.append((node.data[0] + direction[0], node.data[1] + 1))
-                    n_neighbors.append((node.data[0] + direction[0], node.data[1] - 1))
-            for neighbor in n_neighbors:
-                if 0 <= neighbor[0] < self.width and 0 <= neighbor[1] < self.height:
-                    neighbors.append(neighbor)
-        logging.debug(f'ori_pos:{node.data} neighbors:{neighbors}')
-        return neighbors

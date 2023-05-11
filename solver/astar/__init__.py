@@ -33,6 +33,9 @@ class AStar(ABC, Generic[T]):
         def __lt__(self, b: "AStar.SearchNode") -> bool:
             return self.fscore < b.fscore
 
+        def __str__(self):
+            return self.data.__str__()
+
     class SearchNodeDict(dict):
         def __missing__(self, k):
             v = AStar.SearchNode(k)
