@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import pickle
 import time
 
@@ -8,12 +9,18 @@ import numpy as np
 import logging
 import math
 
+import torch
+
+from network.data_loader import point_feature_generate
+from network.utils.obs_feature_map_generate import obs_feature_map_generate
+from network.unet import ResNetUNet
 from solver.astar import AStar, T
 from utils.critic_path import key_path2path, path2key_path
 from utils.net_flag import update_net_flag
 from utils.net_layer_assign import layer_assign
 from multiprocessing import shared_memory
 from solver.astar.multilayer_astar import MazeSolver as MultiLayerAstar
+from sklearn.cluster import KMeans
 
 NET_FLAG_RESOLUTION = 10
 Infinite = float("inf")
@@ -85,8 +92,10 @@ def numpy_to_shared_memory(arr, name, data_dict):
 
 
 class BaseSolver:
+    name = "base_solver"
 
-    def __init__(self, problem):
+    def __init__(self, problem, **kwargs):
+        self.net_groups = None
         self.problem = problem
         self.max_x = self.problem.max_x
         self.max_y = self.problem.max_y
@@ -124,12 +133,24 @@ class BaseSolver:
         except:
             self.shm = shared_memory.SharedMemory(create=True, size=2 ** 30, name='solver_data')
 
+        self.hx_multi_rate = kwargs.get('hx_multi_rate', 1)
+        self.jps_search_rate = kwargs.get('jps_search_rate', 0.1)
+        self.model = None
+        self.device = None
+        if kwargs.get('model_path', None):
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.model = ResNetUNet(2).to(self.device)
+            self.model.load_state_dict(torch.load(kwargs['model_path'], map_location=self.device))
         # self.resolution_change(2)
+
+    def get_name(self):
+        return f'{self.name}_hx{self.hx_multi_rate}_jps{self.jps_search_rate}'
 
     def resolution_change(self, resolution=1):
 
         old_resolution = self.resolution
         self.resolution = resolution
+        # self.line_width = int(self.problem.line_width / resolution)
         self.max_x = int(self.problem.max_x / resolution)
         self.max_y = int(self.problem.max_y / resolution)
         logging.info(f'分辨率修改为{resolution}, max_x={self.max_x}, max_y={self.max_y}')
@@ -158,7 +179,7 @@ class BaseSolver:
             foundPath = key_path2path(foundPath)
             key_path = path2key_path(foundPath)
             update_net_flag(resolution=NET_FLAG_RESOLUTION, net_flags=self.net_flags,
-                            net_flag_details=self.net_flag_details, net_id=old_index, path=foundPath,
+                            net_flag_details=self.net_flag_details, net_id=net_id, path=foundPath,
                             old_index=old_index)
             self.steiner_nets[i]['path'] = key_path
             self.steiner_nets[i]['resolution'] = self.resolution
@@ -169,12 +190,61 @@ class BaseSolver:
         self.resolution_change(resolution)
         self.cross_check()
         self.cross_punish = cross_punish
+        t = time.time()
         for i in self.pending_nets:
             # if i != 17:
             #     continue
             self.route(i)
+        logging.info(f'分辨率为{resolution},惩罚为{cross_punish}的解算完成, 耗时{time.time() - t:.2f}s')
         self.cross_check()
         ...
+
+    def net_group_generate(self, assembly_max=0.1):
+        self.net_groups = []
+        processed_nets = []
+        pending_nets = list(range(len(self.steiner_nets)))
+        for net_id in pending_nets:
+            if net_id in processed_nets:
+                continue
+            nets = self.get_assemble_nets(net_id, assembly_max)
+            if len(nets) <= 1:
+                continue
+            self.net_groups.append(nets)
+            processed_nets.extend(nets)
+        self.net_groups = sorted(self.net_groups, key=lambda ls: len(ls), reverse=True)
+        ...
+
+    def net_group_route(self, net_group_id, **kwargs):
+        net_group = self.net_groups[net_group_id]
+        # collect all points in one layer
+        points = []
+        for net_id in net_group:
+            pin0, pin1 = self.steiner_nets[net_id]['pins'][0], self.steiner_nets[net_id]['pins'][1]
+            points.append((self.pins[pin0]['x'], self.pins[pin0]['y']))
+            points.append((self.pins[pin1]['x'], self.pins[pin1]['y']))
+        # kmeans
+        os.environ['OMP_NUM_THREADS'] = '1'
+        kmeans = KMeans(n_clusters=2, random_state=0, n_init=10).fit(points)
+        # get cluster center
+        center0 = kmeans.cluster_centers_[0]
+        center1 = kmeans.cluster_centers_[1]
+        # TODO：计算nets距离center的偏离程度并进行排序
+        net_shift = []
+        for net_id in net_group:
+            pin0, pin1 = self.steiner_nets[net_id]['pins'][0], self.steiner_nets[net_id]['pins'][1]
+            x0, y0 = self.pins[pin0]['x'], self.pins[pin0]['y']
+            x1, y1 = self.pins[pin1]['x'], self.pins[pin1]['y']
+            distance1 = np.min([math.sqrt((x0 - center0[0]) ** 2 + (y0 - center0[1]) ** 2),
+                                math.sqrt((x1 - center0[0]) ** 2 + (y1 - center0[1]) ** 2)])
+            distance2 = np.min([math.sqrt((x0 - center1[0]) ** 2 + (y0 - center1[1]) ** 2),
+                                math.sqrt((x1 - center1[0]) ** 2 + (y1 - center1[1]) ** 2)])
+            net_shift.append((net_id, distance1 + distance2))
+        net_shift = sorted(net_shift, key=lambda x: x[1])
+
+        # TODO：根据偏离程度从小到大进行route
+        for net_id, _ in net_shift:
+            self.route(net_id, **kwargs)
+            self.pending_nets.remove(net_id)
 
     def solve(self):
         # self.resolution_solve(512, 0)
@@ -205,7 +275,8 @@ class BaseSolver:
         # for i in self.pending_nets:
         #     self.route(i, cross_punish=100)
         # self.cross_check()
-        # self.resolution_change(2)
+        # self.resolution_change(1)
+        return self.steiner_nets, self.resolution
 
     def cross_check(self):
         self.save_data()
@@ -227,7 +298,8 @@ class BaseSolver:
                     for i in range(9):
                         flagx = flagx0 + NINE_DIRECTIONS[i][0]
                         flagy = flagy0 + NINE_DIRECTIONS[i][1]
-                        if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
+                        if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[
+                            2]:
                             continue
                         for neighbor_net in np.where(self.net_flags[layer_id, flagx, flagy, :])[0]:
                             if old_index == neighbor_net:
@@ -239,7 +311,8 @@ class BaseSolver:
                                 point_net_id = d['net_id']
                                 distance = math.hypot(x - point[1], y - point[2])
                                 if distance <= line_width:
-                                    logging.info(f'线{net_id}重叠 交点{point}|{(layer_id,x,y)} 距离{distance}|{line_width}')
+                                    logging.info(
+                                        f'线{net_id}与{point_net_id}重叠 交点{point}|{(layer_id, x, y)} 距离{distance}|{line_width}')
                                     cross = True
                                 if distance < min_distance:
                                     min_distance = distance
@@ -298,8 +371,8 @@ class BaseSolver:
 
     def generate_net_flag(self):
         logging.info('生成网线标记')
-        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.max_x / NET_FLAG_RESOLUTION),
-                                   math.ceil(self.max_y / NET_FLAG_RESOLUTION),
+        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.max_x / NET_FLAG_RESOLUTION)+1,
+                                   math.ceil(self.max_y / NET_FLAG_RESOLUTION)+1,
                                    len(self.nets)), dtype=bool)
         for i in range(len(self.nets)):
             self.net_flag_details[i].clear()
@@ -346,19 +419,25 @@ class BaseSolver:
                     pts = pts.reshape((-1, 1, 2))
                     cv2.fillPoly(self.obstacle[layer_id, :, :], [pts], color=(pin.get('net_id', -2),))
 
-    def get_assemble_nets(self, net_id, assembly_max):
+    def get_assemble_nets(self, net_id, assembly_max, nets=None):
+        if nets is None:
+            nets = []
         if np.sum(self.net_assemble_flag[net_id] < assembly_max) < 1:
             return [net_id]
-        result = [net_id]
+        if net_id not in nets:
+            nets.append(net_id)
         for i in range(len(self.steiner_nets)):
-            if i == net_id:
+            if i in nets:
                 continue
             if self.net_assemble_flag[net_id, i] < assembly_max:
-                result.append(i)
-        return result
+                new_nets = self.get_assemble_nets(i, assembly_max, nets)
+                for net in new_nets:
+                    if net not in nets:
+                        nets.append(net)
+        return nets
 
     def assemble_net_display(self, net_id):
-        assembly_max = 0.15
+        assembly_max = 0.1
         if np.sum(self.net_assemble_flag[net_id] < assembly_max) < 1:
             return
         if not hasattr(self, 'ploted_nets'):
@@ -408,9 +487,12 @@ class BaseSolver:
         self.shm.buf[:8] = data_len.tobytes()
         self.shm.buf[8:8 + data_len] = binary_data
 
-    def display(self):
+    def display(self, base_img=None, layers=None, save_path=None):
+        if layers is None:
+            layers = list(range(self.layer_num))
+        img = np.zeros(((self.max_x + 1), (self.max_y + 1), 3), dtype=np.uint8)
         for layer in range(self.layer_num):
-            img = np.zeros(((self.max_x + 1), (self.max_y + 1), 3), dtype=np.uint8)
+
             # cv2.rectangle(img, (-1, -1), (self.max_y + 1, self.max_x + 1), (255, 255, 255), 1)
 
             img[np.where(self.obstacle[layer, :, :] != -1)] = (120, 120, 120)
@@ -426,7 +508,7 @@ class BaseSolver:
                         x1 = x + w if x <= self.max_x - w else x
                         y0 = y - w if y >= w else y
                         y1 = y + w if y <= self.max_y - w else y
-                        img[x0:x1, y0:y1] = (0, 255, 255) if net.get('cross') else [0, 255, 0]
+                        img[x0:x1, y0:y1] = (0, 200, 200) if net.get('cross') else [0, 200, 0]
                         # if x <= 0 or x > self.max_x or y <= 0 or y > self.max_y:
                         #     logging.info(f'超出范围 {x} {y} 网络ID {net["index"]}')
 
@@ -434,11 +516,17 @@ class BaseSolver:
             for pin in self.pins:
                 if layer in pin['layers']:
                     x, y = pin['x'], pin['y']
-                    img[x - w:x + w, y - w:y + w] = (0, 0, 255)
+                    img[x - w:x + w, y - w:y + w] = (0, 0, 200)
 
-            mat270 = np.rot90(img, 1)
-            cv2.imwrite(f'img_layer{layer}.jpg', mat270)
-            logging.info(f'画图结束 保存为img_layer{layer}.jpg')
+        if base_img is not None:
+            for i in [0, 2]:
+                img[:, :, i] = base_img[:, :] * 50 + img[:, :, i]
+
+        mat270 = np.rot90(img, 1)
+        if save_path is None:
+            save_path = 'img_layer{layer}.jpg'
+        cv2.imwrite(save_path, mat270)
+        logging.info(f'画图结束 保存为img_layer{layer}.jpg')
             # self.net_display_init()
             # for i in range(len(self.steiner_nets)):
             #     self.net_display(i)
@@ -483,11 +571,18 @@ class BaseSolver:
         pin0, pin1 = net['pins'][0], net['pins'][1]
         ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
+
+        recommend_area = self.generate_recommend_area(net_id) if self.model else None
         # A*算法
         _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
                                   layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
                                   end_layers=self.pins[pin1]['layers'],
-                                  line_width=(self.line_width + self.clearance) / self.resolution, **kwargs)
+                                  line_width=(self.line_width + self.clearance) / self.resolution, net_id=net_id,
+                                  hx_multi_rate=self.hx_multi_rate,
+                                  jps_search_rate=self.jps_search_rate,
+                                  recommend_area=recommend_area,
+                                  speed_test=True,
+                                  **kwargs)
         # TODO：跨层情况下，对平面方向不连续的方向是否可以裁剪
         _found_path = _solver.astar(ori_position, target_pos)
         if _found_path:
@@ -620,3 +715,86 @@ class BaseSolver:
                     print(f'{net_id1} and {net_id2} cross at {p1}')
                     return True
         return False
+
+    def save(self, path):
+        with open(path, 'wb') as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(path):
+        with open(path, 'rb') as f:
+            self = pickle.load(f)
+        return self
+
+    def generate_recommend_area(self, net_id, pass_small_net=False):
+        # 检测img下是否有net_id文件夹，没有则创建
+        WIDTH = 384  # 模型需要的边长
+        net = self.steiner_nets[net_id]
+        old_index = net['old_index']
+        pin0, pin1 = net['pins'][0], net['pins'][1]
+        ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
+        target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
+        # 如果起始点和终止点欧式距离小于0.1WIDTH则返回None
+        if pass_small_net and math.hypot(ori_position[1] - target_pos[1], ori_position[2] - target_pos[2]) < 40:
+            return None
+        # 如果起始点和终止点横或纵距离大于384则返回None
+        if abs(ori_position[1] - target_pos[1]) > WIDTH or abs(ori_position[2] - target_pos[2]) > WIDTH:
+            return None
+        if not os.path.exists(f'img/{net_id}'):
+            os.mkdir(f'img/{net_id}')
+        width = self.max_x + 1 if self.max_x > WIDTH else WIDTH
+        height = self.max_y + 1 if self.max_y > WIDTH else WIDTH
+        feature_map = np.ones((self.layer_num + 1, width, height), dtype=float)
+        obs_feature_map = feature_map[1:]
+        obs_feature_map[np.where(self.obstacle == -1)] = 0
+        obs_feature_map[np.where(self.obstacle == old_index)] = 0
+        feature_map[0] = point_feature_generate(feature_map[0], ori_position, target_pos)
+        obs_feature_map_generate(-1, feature_map, self.steiner_nets, add=1, old_index=old_index)
+        for i in range(0, self.layer_num + 1):
+            if i == 0: layers = None
+            else: layers = [i-1]
+            self.display(feature_map[i], save_path=f'img/{net_id}/{i}.png')
+        # 起始点和终止点的中点
+        mid_point = ((ori_position[1] + target_pos[1]) // 2, (ori_position[2] + target_pos[2]) // 2)
+        # 如果长或者宽大于384，以中点为中心，将feature_map的长或者宽裁剪到384
+        x_min = y_min = 0
+        x_max = y_max = WIDTH
+        if width > WIDTH:
+            x_min = mid_point[0] - WIDTH // 2
+            x_max = mid_point[0] + WIDTH // 2
+            if x_min < 0:
+                x_min = 0
+                x_max = WIDTH
+            elif x_max >= width:
+                x_min = width - WIDTH - 1
+                x_max = width - 1
+            feature_map = feature_map[:, x_min:x_max, :]
+        if height > WIDTH:
+            y_min = mid_point[1] - WIDTH // 2
+            y_max = mid_point[1] + WIDTH // 2
+            if y_min < 0:
+                y_min = 0
+                y_max = WIDTH
+            elif y_max >= height:
+                y_min = height - WIDTH - 1
+                y_max = height - 1
+            feature_map = feature_map[:, :, y_min:y_max]
+        assert feature_map.shape == (self.layer_num + 1, WIDTH, WIDTH)
+        # 将feature_map送入模型进行预测
+        feature_map = torch.from_numpy(feature_map).unsqueeze(0).float()
+        feature_map = feature_map.to(self.device)
+        with torch.no_grad():
+            s = time.time()
+            pred = self.model(feature_map)
+            logging.info(f'generate pred for net {net_id} cost {time.time() - s}s')
+        pred = pred.squeeze(0).cpu().numpy()
+        # 将预测结果通过sigmoid映射到0-1
+        pred = 1 / (1 + np.exp(-pred))
+        # pred = (pred - pred.min()) / (pred.max() - pred.min()) if pred.max() - pred.min() > 0 else pred
+        # 将结果映射到原坐标系
+        recommend_area = np.zeros((self.layer_num, self.max_x + 1, self.max_y + 1), dtype=float)
+        recommend_area[:, x_min:x_max, y_min:y_max] = pred
+        for i in range(self.layer_num):
+            self.display(recommend_area[i], layers=[i], save_path=f'img/{net_id}/pred_{i}.png')
+
+        return recommend_area

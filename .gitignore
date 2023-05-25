@@ -5,3 +5,9 @@ __pycache__
 *.png
 *.json
 *.pkl
+*.pickle
+/data/search_path/
+/network/dataset
+/logs
+log.txt
+*.pth

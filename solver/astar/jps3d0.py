@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 
@@ -7,6 +8,18 @@ from solver.astar import AStar, T
 from heapq import heappush, heappop
 from typing import Iterable, Union, TypeVar, Generic
 import logging
+
+
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
 
 NET_FLAG_RESOLUTION = 10
 Infinite = float("inf")
@@ -41,6 +54,28 @@ class JPSSolver(AStar):
     """sample use of the astar algorithm. In this exemple we work on a maze made of ascii characters,
     and a 'node' is just a (x,y) tuple that represents a reachable position"""
 
+    class SearchNode(AStar.SearchNode):
+        """Representation of a search node"""
+
+        __slots__ = ("data", "gscore", "fscore", "closed", "came_from", "out_openset", "jps")
+
+        def __init__(
+                self, data: T, gscore: float = Infinite, fscore: float = Infinite
+        ) -> None:
+            self.data = data
+            self.gscore = gscore
+            self.fscore = fscore
+            self.closed = False
+            self.out_openset = True
+            self.came_from = None
+            self.jps = None
+
+    class SearchNodeDict(AStar.SearchNodeDict):
+        def __missing__(self, k):
+            v = JPSSolver.SearchNode(k)
+            self.__setitem__(k, v)
+            return v
+
     def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max,
                  available_range=None,
                  **kwargs):
@@ -56,9 +91,18 @@ class JPSSolver(AStar):
         self.layer_max = layer_max
         self.available_range = available_range
         self.cross_punish = kwargs.get('cross_punish', 10)
-        self.line_width = kwargs.get('line_width', 2.5)
+        self.line_width = max(kwargs.get('line_width', 2.5), 1)  # 为0时可能存在交叉问题
         self.passable_cache = {}
+        self.viable_cache = {}
+        self.speed_test = kwargs.get('speed_test', False)
+        self.save_search_path = True
+        if self.speed_test:
+            self.save_search_path = False
+        self.net_id = kwargs.get('net_id', None)
         # logging.info(f'开始布线 line_width:{self.line_width}')
+        self.hx_multi_rate = kwargs.get('hx_multi_rate', 1)
+        self.jps_search_rate = kwargs.get('jps_search_rate', 0.1)
+        self.recommend_area = kwargs.get('recommend_area', None)
 
     def is_pass(self, node_data, vertical_move=False):
         key = (node_data, vertical_move)
@@ -70,7 +114,9 @@ class JPSSolver(AStar):
 
     def _is_pass(self, node_data, vertical_move=False):
         (layer, x, y) = node_data
-        log_flag = False
+        log_flag = True
+        if self.speed_test:
+            log_flag = False
         if layer < 0 or layer >= self.layer_max:
             if log_flag: logging.debug(f'layer out of range, {node_data}')
             return False
@@ -114,6 +160,7 @@ class JPSSolver(AStar):
                         layer1, x1, y1 = point
                         if neighbor_net == self.old_index:
                             if layer1 == layer and x == x1 and y == y1:
+                                # if log_flag: logging.debug(f'is_pass: 与其他的同线路线相交 {node_data}')
                                 return 2
                         else:
                             if layer1 == layer and math.hypot(x1 - x, y1 - y) <= self.line_width:
@@ -129,7 +176,7 @@ class JPSSolver(AStar):
         layer_distance = 0
         if layer1 not in self.end_layers:
             layer_distance = 1
-        return max(distance) + (math.sqrt(2) - 1) * min(distance) + layer_distance
+        return (max(distance) + (math.sqrt(2) - 1) * min(distance) + layer_distance) * self.hx_multi_rate
 
     def distance_between(self, n1, n2):
         """this method always returns 1, as two 'neighbors' are always adajcent"""
@@ -138,7 +185,6 @@ class JPSSolver(AStar):
         (layer2, x2, y2) = n2
         layer_distance = 0 if layer1 == layer2 else VIA_COST
         gscore = math.hypot(x2 - x1, y2 - y1) + layer_distance
-
         return gscore
 
     def neighbors(self, node):
@@ -183,27 +229,11 @@ class JPSSolver(AStar):
                     if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height:
                         neighbors.append(neighbor)
             # 通孔
-            if (self.solver.obstacle[:, x, y] != -1).any():
-                ...
-            else:
-                via_able = True
-                flagx, flagy = int(x / NET_FLAG_RESOLUTION), int(y / NET_FLAG_RESOLUTION)
-                if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
-                    pass
-                else:
-                    for neighbor_net in np.where(self.net_flags[layer, flagx, flagy, :])[0]:
-                        if neighbor_net == self.old_index:
-                            continue
-                        for d in self.net_flag_details[neighbor_net][(layer, flagx, flagy)]:
-                            point = d['point']
-                            layer1, x1, y1 = point
-                            if layer1 == layer and math.hypot(x1 - x, y1 - y) <= self.line_width:
-                                via_able = False
-                if via_able:
-                    for layer in range(self.layer_max):
-                        neighbor = (layer, x, y)
-                        if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and layer != node.data[0]:
-                            neighbors.append(neighbor)
+            if self.is_viable(node.data):
+                for layer in range(self.layer_max):
+                    neighbor = (layer, x, y)
+                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and layer != node.data[0]:
+                        neighbors.append(neighbor)
 
         no_obs_neighbors = []
         for ng in neighbors:
@@ -215,6 +245,46 @@ class JPSSolver(AStar):
             f'from {node.came_from.data if node.came_from else None}'
             f'neighbors:{neighbors}')
         return neighbors
+
+    def is_viable(self, node):
+        layer, x, y = node
+        node_key = (x, y)
+        if self.viable_cache.__contains__(node_key):
+            return self.viable_cache[node_key]
+        else:
+            result = self._is_viable(node)
+            self.viable_cache[node_key] = result
+            return result
+
+    def _is_viable(self, node):
+        layer, x, y = node
+        if (self.solver.obstacle[:, x, y] != -1).any():
+            return False
+        flagx0, flagy0 = int(x / NET_FLAG_RESOLUTION), int(y / NET_FLAG_RESOLUTION)
+        for i in range(9):
+            direction_x = NINE_DIRECTIONS[i][0]
+            direction_y = NINE_DIRECTIONS[i][1]
+            gap = (NET_FLAG_RESOLUTION * 0.5 - self.line_width)
+            if direction_x != 0:
+                if direction_x * (x - (flagx0 + 0.5) * NET_FLAG_RESOLUTION) < gap:
+                    continue
+            if direction_y != 0:
+                if direction_y * (y - (flagy0 + 0.5) * NET_FLAG_RESOLUTION) < gap:
+                    continue
+            flagx = flagx0 + direction_x
+            flagy = flagy0 + direction_y
+            if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
+                pass
+            else:
+                for layer in range(self.layer_max):
+                    for neighbor_net in np.where(self.net_flags[layer, flagx, flagy, :])[0]:
+                        for d in self.net_flag_details[neighbor_net][(layer, flagx, flagy)]:
+                            point = d['point']
+                            layer1, x1, y1 = point
+                            if neighbor_net != self.old_index:
+                                if math.hypot(x1 - x, y1 - y) <= self.line_width:
+                                    return False
+        return True
 
     def is_goal_reached(self, current: T, goal: T) -> bool:
         """
@@ -228,19 +298,27 @@ class JPSSolver(AStar):
             return False
         return (x0, y0) == (x1, y1)
 
-    def jump_node(self, node, prev_node, jump_num=0, jump_max=1e10):
+    def jump_node(self, node, prev_node, jump_num=0, jump_max=1e10, **kwargs):
+        debug = False
         if jump_num > jump_max:
-            return node
+            if kwargs.get('no_max_return_node'):
+                if debug: logging.debug(f'jump_node: jump_max no max return {node}')
+                return None, {}
+            if debug: logging.debug(f'jump_node: jump_max {node}')
+            return node, {}
         jump_num += 1
         layer, x, y = node
         direction = (x - prev_node[1], y - prev_node[2])
         if self.is_goal_reached(node, self.goal):
-            return node
+            if debug: logging.debug(f'jump_node: goal reached {node}')
+            return node, {}
         pass_result = self.is_pass(node, direction == (0, 0))
         if not pass_result:
-            return None
+            if debug: logging.debug(f'jump_node: not pass {node}')
+            return None, {}
         if direction == (0, 0):  # 竖向迁移
-            return node
+            if debug: logging.debug(f'jump_node: vertical {node}')
+            return node, {}
         else:
             if direction[0] == 0 or direction[1] == 0:  # 横向迁移
                 if direction[0] != 0:
@@ -252,8 +330,8 @@ class JPSSolver(AStar):
                     '''
                     if (self.is_pass((layer, x + direction[0], y + 1)) and not self.is_pass((layer, x, y + 1))) or \
                             (self.is_pass((layer, x + direction[0], y - 1)) and not self.is_pass((layer, x, y - 1))):
-                        # logging.debug(f'jump_node 水平方向: {node} {prev_node} {direction}')
-                        return node
+                        if debug: logging.debug(f'jump_node 水平方向: {node} {prev_node} {direction}')
+                        return node, {}
                 else:  # 垂直方向
                     # 右下能走且右不能走，或坐下能走且左不能走
                     '''
@@ -264,31 +342,58 @@ class JPSSolver(AStar):
                     '''
                     if (self.is_pass((layer, x + 1, y + direction[1])) and not self.is_pass((layer, x + 1, y))) or (
                             self.is_pass((layer, x - 1, y + direction[1])) and not self.is_pass((layer, x - 1, y))):
-                        # logging.debug(f'jump_node 垂直方向: {node} {prev_node} {direction}')
-                        return node
+                        if debug: logging.debug(f'jump_node 垂直方向: {node} {prev_node} {direction}')
+                        return node, {}
             elif direction[0] != 0 and direction[1] != 0:  # 斜向迁移
                 if (self.is_pass((layer, x - direction[0], y + direction[1])) and
                         not self.is_pass((layer, x - direction[0], y))):
-                    # logging.debug(f'jump_node 斜向方向: {node} {prev_node} {direction}')
-                    return node
+                    if debug: logging.debug(f'jump_node 斜向方向: {node} {prev_node} {direction}')
+                    return node, {}
                 if (self.is_pass((layer, x + direction[0], y - direction[1])) and
                         not self.is_pass((layer, x, y - direction[1]))):
-                    # logging.debug(f'jump_node 斜向方向: {node} {prev_node} {direction}')
-                    return node
+                    if debug: logging.debug(f'jump_node 斜向方向: {node} {prev_node} {direction}')
+                    return node, {}
             else:
                 raise Exception('Unknown direction')
 
         if direction[0] != 0 and direction[1] != 0:
-            t1 = self.jump_node((layer, x + direction[0], y), node, jump_num, jump_max)
-            t2 = self.jump_node((layer, x, y + direction[1]), node, jump_num, jump_max)
+            t1, data1 = self.jump_node((layer, x + direction[0], y), node, jump_num, jump_max, no_max_return_node=True,
+                                       **kwargs)
+            t2, data2 = self.jump_node((layer, x, y + direction[1]), node, jump_num, jump_max, no_max_return_node=True,
+                                       **kwargs)
             if t1 or t2:
-                # logging.debug(f'jump_node 斜方向，水平方向有其他跳点: {node} {prev_node} {direction}')
-                return node
+                if debug: logging.debug(f'jump_node 斜方向，水平方向有其他跳点: {node} {prev_node} {direction}')
+                jps = []
+                if t1:
+                    jps.append(t1)
+                if t2:
+                    jps.append(t2)
+                return_flag = True
+                # 过滤连续的跳点 倾斜状态下
+                if kwargs.get('jps'):
+                    unique_jp_num = len(jps)
+                    ori_jps = kwargs.get('jps')
+                    for t in jps:
+                        for ori_t in ori_jps:
+                            if abs(t[1] - ori_t[1]) <= 1 and abs(t[2] - ori_t[2]) <= 1:
+                                unique_jp_num -= 1
+                                break
+                    if unique_jp_num == 0:
+                        kwargs['jps'] = jps
+                        return_flag = False
+                if return_flag:
+                    return node, {'jps': jps}
+        # if not self.is_viable((layer, x, y)) and self.is_viable((layer, x + direction[0], y + direction[1])):
+        #     new_node = (layer, x + direction[0], y + direction[1])
+        #     if debug: logging.debug(f'jump_node: 有via点 {node} {prev_node} {direction}')
+        #     return new_node, {}
         if self.is_pass((layer, x + direction[0], y)) or self.is_pass((layer, x, y + direction[1])):
-            t = self.jump_node((layer, x + direction[0], y + direction[1]), node, jump_num, jump_max)
+            t, _ = self.jump_node((layer, x + direction[0], y + direction[1]), node, jump_num, jump_max, **kwargs)
             if t:
-                return t
-        return None
+                if debug: logging.debug(f'jump_node 继续向前搜索跳点: {node} {prev_node} {direction}')
+                return t, {}
+        if debug: logging.debug(f'jump_node: 啥也没发现 {node} {prev_node} {direction}')
+        return None, ''
 
     def astar(
             self, start: T, goal: T, reversePath: bool = False
@@ -296,24 +401,34 @@ class JPSSolver(AStar):
         self.goal = goal
         if self.is_goal_reached(start, goal):
             return [start]
-        searchNodes = AStar.SearchNodeDict()
-        startNode = searchNodes[start] = AStar.SearchNode(
+        jump_max = math.hypot(goal[1] - start[1], goal[2] - start[2]) * self.jps_search_rate
+        jump_max = max(20, int(jump_max))
+        searchNodes = JPSSolver.SearchNodeDict()
+        startNode = searchNodes[start] = JPSSolver.SearchNode(
             start, gscore=0.0, fscore=self.heuristic_cost_estimate(start, goal)
         )
         openSet: list = []
         heappush(openSet, startNode)
+        search_path = []
         while openSet:
             current = heappop(openSet)
             logging.debug(f'current:{current.data} f:{current.fscore}  target:{goal}')
             if self.is_goal_reached(current.data, goal):
+                if self.save_search_path:
+                    with open(f'data/search_path/{self.net_id}_search_path.json', 'w') as f:
+                        json.dump(search_path, f, cls=NpEncoder)
                 return self.reconstruct_path(current, reversePath)
             current.out_openset = True
             current.closed = True
+            neighbors = []
             for neighbor in self.neighbors(current):
-                jp_pos = self.jump_node(neighbor, current.data, jump_max=15)
+                direction = (neighbor[1] - current.data[1], neighbor[2] - current.data[2])
+                jp_pos, jp_data = self.jump_node(neighbor, current.data,
+                                                 jump_max=jump_max, jps=None, ori_direction=direction)
                 if jp_pos is None:
-                    # logging.debug(f'jump_node is None: {neighbor} {current.data}')
+                    logging.debug(f'jump_node is None: NG:{neighbor} CURRENT:{current.data}')
                     continue
+                if self.save_search_path: neighbors.append(jp_pos)  # use for log
                 jp = searchNodes[jp_pos]
                 if jp.closed:
                     continue
@@ -327,6 +442,10 @@ class JPSSolver(AStar):
                 jp.fscore = tentative_gscore + self.heuristic_cost_estimate(
                     jp.data, goal
                 )
+                if self.recommend_area is not None:
+                    jp.fscore = jp.fscore * (1 - 0.2 * self.recommend_area[jp_pos])
+                if jp_data.get('jps'):
+                    jp.jps = jp_data['jps']
                 logging.debug(f'current:{current.data} neighbor:{neighbor} jp:{jp.data} f:{jp.fscore} target:{goal}')
                 if jp.out_openset:
                     jp.out_openset = False
@@ -335,4 +454,7 @@ class JPSSolver(AStar):
                     # re-add the node in order to re-sort the heap
                     openSet.remove(jp)
                     heappush(openSet, jp)
+            if self.save_search_path:
+                data = {'current': current.data, 'neighbors': neighbors}
+                search_path.append(data)
         return None

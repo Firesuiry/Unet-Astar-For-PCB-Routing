@@ -2,6 +2,7 @@
 var canvas = new fabric.Canvas("canvas");
 
 var data = undefined;
+var search_path = undefined;
 var display_layer = 0;
 var pin_bind = {};
 var layer_element = document.getElementById("layer");
@@ -10,6 +11,17 @@ var layer_input_element = document.getElementById("layer_num_input");
 var net_input_element = document.getElementById("net_input");
 var point_input_element = document.getElementById("point_input");
 var multi_rate = 1;
+
+canvas.on('mouse:down', function (e) {
+    getMouseCoords(e);
+});
+
+function getMouseCoords(event) {
+    var pointer = canvas.getPointer(event.e);
+    var posX = pointer.x / multi_rate;
+    var posY = pointer.y / multi_rate;
+    console.log(posX + ", " + posY);    // Log to console
+}
 
 function get_data() {
     fetch('http://127.0.0.1:5000/ ').then(res => {
@@ -22,6 +34,91 @@ function get_data() {
     })
 }
 
+function search_path_onclick() {
+    var net_id = parseInt(net_input_element.value);
+    get_search_path(net_id);
+}
+
+function get_search_path(net_id) {
+    console.log('get_search_path' + net_id.toString())
+    fetch('http://127.0.0.1:5000/search_path/' + net_id.toString()).then(res => {
+        return res.json()
+    }).then(res2 => {
+        // console.log(res2)
+        search_path = res2
+    }).then(res3 => {
+        // display_search_path(0);
+        // display_data(0);
+        for (var i = 0; i < point_element_list.length; i++) {
+            canvas.remove(point_element_list[i]);
+        }
+        point_element_list = [];
+        search_path_index = 0;
+        search_path_animation();
+    })
+}
+
+var search_path_index = 0;
+var last_current_point_element = undefined;
+var point_element_list = [];
+
+function display_search_path(index = undefined) {
+    if (index !== undefined) {
+        search_path_index = index;
+    } else {
+        search_path_index += 1;
+    }
+
+    if (search_path_index >= search_path.length) {
+        return;
+    }
+
+    current = search_path[search_path_index]['current'];
+    neighbors = search_path[search_path_index]['neighbors'];
+    if (last_current_point_element !== undefined) {
+        canvas.remove(last_current_point_element);
+    }
+    last_current_point_element = new fabric.Circle({
+        radius: 3,
+        fill: 'red',
+        left: current[1] * multi_rate,
+        top: current[2] * multi_rate,
+        lockMovementX: true,
+        lockMovementY: true,
+        selected: false,
+    })
+    canvas.add(last_current_point_element);
+    for (var i = 0; i < neighbors.length; i++) {
+        neighbor = neighbors[i];
+        element = new fabric.Circle({
+            radius: 2,
+            fill: 'blue',
+            left: neighbor[1] * multi_rate,
+            top: neighbor[2] * multi_rate,
+            lockMovementX: true,
+            lockMovementY: true,
+            selected: false,
+            opacity: 0.5,
+        })
+        canvas.add(element);
+        point_element_list.push(element);
+    }
+
+}
+
+function search_path_animation() {
+    if (search_path === undefined) {
+        console.log('search_path is undefined')
+        return
+    }
+    if (search_path_index >= search_path.length) {
+        return;
+    }
+
+    display_search_path();
+    setTimeout(search_path_animation, 100);
+}
+
 function display_data(active_layer) {
     canvas.clear();
     layer_element.textContent = active_layer.toString();
@@ -31,7 +128,7 @@ function display_data(active_layer) {
     let max_length = Math.max(data.max_x, data.max_y);
     if (max_length < 500) {
         multi_rate = Math.ceil(1000 / max_length);
-    }else{
+    } else {
         multi_rate = 1;
     }
     canvas.setWidth(data.max_x * multi_rate);
@@ -54,7 +151,7 @@ function display_data(active_layer) {
             for (var j = 0; j < points.length - 1; j++) {
                 start_point = points[j];
                 end_point = points[j + 1];
-                if(start_point.x === end_point.x && start_point.y === end_point.y){
+                if (start_point.x === end_point.x && start_point.y === end_point.y) {
                     continue
                 }
                 element = new fabric.Line([start_point.x, start_point.y, end_point.x, end_point.y], {
@@ -220,7 +317,7 @@ function show_net() {
                 lockMovementX: true,
                 lockMovementY: true,
                 selected: false,
-                strokeWidth: 3,
+                strokeWidth: 1,
             });
             element.id = i
             element.tp = 'net'

@@ -1,0 +1,8 @@
+scikit-opt
+Pillow
+matplotlib
+opencv-python
+torchvision
+torch
+scikit-learn
+tqdm

@@ -5,9 +5,7 @@ import logging
 
 
 class Solver1(BaseSolver):
-
-    def __init__(self, problem):
-        super().__init__(problem)
+    ...
 
     # def solve(self):
     #     super().solve()

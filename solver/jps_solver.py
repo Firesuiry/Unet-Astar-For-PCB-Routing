@@ -5,12 +5,7 @@ import logging
 
 
 class JpsSolver(BaseSolver):
-
-    def __init__(self, problem):
-        super().__init__(problem)
+    name = 'JPS_solver'
 
     def get_solver(self, **kwargs):
         return JPSSolver(**kwargs)
-
-    # def solve(self):
-    #     super().solve()

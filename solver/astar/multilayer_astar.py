@@ -92,7 +92,7 @@ class MazeSolver(AStar):
             if (x2 + x0 == x1 and y2 + y0 == y1) or (layer1 != layer2):
                 pass
             else:
-                gscore += 0.5
+                gscore += 3
 
         # 交叉
         min_distance = Infinite
