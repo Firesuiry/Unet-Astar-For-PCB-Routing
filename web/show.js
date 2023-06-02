@@ -21,6 +21,7 @@ function getMouseCoords(event) {
     var posX = pointer.x / multi_rate;
     var posY = pointer.y / multi_rate;
     console.log(posX + ", " + posY);    // Log to console
+    msg_element.textContent = posX + ", " + posY;
 }
 
 function get_data() {
@@ -79,7 +80,7 @@ function display_search_path(index = undefined) {
         canvas.remove(last_current_point_element);
     }
     last_current_point_element = new fabric.Circle({
-        radius: 3,
+        radius: 2,
         fill: 'red',
         left: current[1] * multi_rate,
         top: current[2] * multi_rate,
@@ -91,7 +92,7 @@ function display_search_path(index = undefined) {
     for (var i = 0; i < neighbors.length; i++) {
         neighbor = neighbors[i];
         element = new fabric.Circle({
-            radius: 2,
+            radius: 1,
             fill: 'blue',
             left: neighbor[1] * multi_rate,
             top: neighbor[2] * multi_rate,
@@ -119,7 +120,7 @@ function search_path_animation() {
     setTimeout(search_path_animation, 100);
 }
 
-function display_data(active_layer) {
+function display_data(active_layer, net_id_limit=-1) {
     canvas.clear();
     layer_element.textContent = active_layer.toString();
     if (data === undefined) {
@@ -134,6 +135,9 @@ function display_data(active_layer) {
     canvas.setWidth(data.max_x * multi_rate);
     canvas.setHeight(data.max_y * multi_rate);
     for (i = 0; i < data.steiner_nets.length; i++) {
+        if(net_id_limit !== -1 && i >= net_id_limit){
+            break
+        }
         var net = data.steiner_nets[i]
         if (net.path === undefined) {
             continue
@@ -282,6 +286,13 @@ function show_point() {
     canvas.add(element);
 
     canvas.renderAll();
+}
+
+function show_previous_net() {
+    let net_str = net_input_element.value;
+    let net_id = parseInt(net_str);
+    let layer_num = parseInt(layer_input_element.value);
+    display_data(layer_num, net_id);
 }
 
 function show_net() {

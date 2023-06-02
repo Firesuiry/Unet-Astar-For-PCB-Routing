@@ -31,6 +31,7 @@ class RandomProblem:
         self.grid = 2
         self.clearance = 1
         self.line_width = 1
+        self.via_radius = 1
 
         self.padstacks = None
         self.generate_padstack()
@@ -145,6 +146,16 @@ class Problem:
         self.grid = resolver.grid
         self.clearance = resolver.clearance
         self.line_width = resolver.line_width
+        self.via_radius = 1
+        via_names = None
+        for data in resolver.structure_data:
+            if list(data.keys())[0] == 'via':
+                via_names = list(data.values())[0].split()
+        for via_name in via_names:
+            patstack = self.padstacks[via_name]
+            for k, v in patstack.items():
+                if v['detail'][0] < self.via_radius or self.via_radius == 1:
+                    self.via_radius = v['detail'][0]
 
         self.x_offset = 0
         self.y_offset = 0

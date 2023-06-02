@@ -65,8 +65,10 @@ class MyDataset(Dataset):
         feature_map = np.load(feature_map_file)
         # load result with npy
         result = np.load(result_file)
-        x_size = math.ceil(feature_map.shape[1] / 32) * 32
-        y_size = math.ceil(feature_map.shape[2] / 32) * 32
+        # x_size = math.ceil(feature_map.shape[1] / 32) * 32
+        # y_size = math.ceil(feature_map.shape[2] / 32) * 32
+        x_size = math.ceil(5000 / 8 / 32) * 32
+        y_size = math.ceil(5000 / 8 / 32) * 32
         new_result = np.zeros((result.shape[0], x_size, y_size), dtype=np.float32)
         new_result[:, :result.shape[1], :result.shape[2]] = result
         result = new_result

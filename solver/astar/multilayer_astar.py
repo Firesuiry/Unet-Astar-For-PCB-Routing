@@ -60,6 +60,8 @@ class MazeSolver(AStar):
         self.cross_punish = kwargs.get('cross_punish', 10)
         self.line_width = kwargs.get('line_width', 2.5)
 
+        self.recommend_area = kwargs.get('recommend_area', None)
+
     def heuristic_cost_estimate(self, n1, n2):
         """computes the 'direct' distance between two (x,y) tuples"""
         (layer1, x1, y1) = n1

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <Meta http-equiv="Content-Language" Content="zh-CN">
-    <title>Title</title>
+    <title>PCB布线监测</title>
     <script src="fabric.js"></script>
 </head>
 <body>
@@ -14,7 +14,10 @@
 <input id="layer_num_input">
 <button onclick="change_layer()">切换</button><br/>
 <input id="net_input">
-<button onclick="show_net()">显示net</button><button onclick="search_path_onclick()">布线过程演示</button><br/>
+<button onclick="show_net()">显示net</button>
+<button onclick="search_path_onclick()">布线过程演示</button>
+<button onclick="show_previous_net()">展示该线之前的线路</button>
+<br/>
 <input id="point_input">
 <button onclick="show_point()">显示point</button><br/>
 

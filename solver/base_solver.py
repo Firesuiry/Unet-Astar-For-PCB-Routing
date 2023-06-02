@@ -3,6 +3,7 @@ import json
 import os
 import pickle
 import time
+from datetime import datetime
 
 import cv2
 import numpy as np
@@ -21,6 +22,12 @@ from utils.net_layer_assign import layer_assign
 from multiprocessing import shared_memory
 from solver.astar.multilayer_astar import MazeSolver as MultiLayerAstar
 from sklearn.cluster import KMeans
+
+from utils.pin_group_divide import pin_group_divide
+
+import multiprocessing as mp
+
+from utils.util import pin_hot_value_calculate
 
 NET_FLAG_RESOLUTION = 10
 Infinite = float("inf")
@@ -91,6 +98,20 @@ def numpy_to_shared_memory(arr, name, data_dict):
     return shm
 
 
+def _route(ra, _solver, ori_position, target_pos, net_id, save_path_flag=False):
+    s = time.time()
+    _found_path = _solver.astar(ori_position, target_pos)
+    msg = f'{net_id}布线结束  耗时{time.time() - s:.2f}s ra:{ra is not None}'
+    file_name = f'logs/ra0.txt' if ra is None else f'logs/ra1.txt'
+    with open(file_name, 'a+', encoding='utf-8') as f:
+        f.write(datetime.now().strftime("%Y-%m-%d-%H-%M-%S|") + msg + '\n')
+    logging.info(msg)
+    if save_path_flag:
+        with open(f'data/net_path/net{net_id}_{ra is not None}_found_path.pickle', 'wb') as f:
+            pickle.dump(_found_path, f)
+    return _found_path
+
+
 class BaseSolver:
     name = "base_solver"
 
@@ -104,10 +125,14 @@ class BaseSolver:
         self.clearance = self.problem.clearance
         self.line_width = self.problem.line_width
         self.resolution = 1
+        self.via_radius = self.problem.via_radius
         self.pins = copy.deepcopy(self.problem.pins)
         self.padstacks = self.problem.padstacks
+        self.padstack_range = {}
         self.nets = self.problem.nets
         self.cross_punish = 0
+
+        self.run_time = 0
 
         self.steiner_nets = []
         self.pending_nets = []
@@ -142,6 +167,7 @@ class BaseSolver:
             self.model = ResNetUNet(2).to(self.device)
             self.model.load_state_dict(torch.load(kwargs['model_path'], map_location=self.device))
         # self.resolution_change(2)
+        self.pin_groups = []
 
     def get_name(self):
         return f'{self.name}_hx{self.hx_multi_rate}_jps{self.jps_search_rate}'
@@ -150,7 +176,9 @@ class BaseSolver:
 
         old_resolution = self.resolution
         self.resolution = resolution
-        # self.line_width = int(self.problem.line_width / resolution)
+        self.line_width = int(self.problem.line_width / resolution)
+        self.clearance = int(self.problem.clearance / resolution)
+        self.via_radius = int(self.problem.via_radius / resolution)
         self.max_x = int(self.problem.max_x / resolution)
         self.max_y = int(self.problem.max_y / resolution)
         logging.info(f'分辨率修改为{resolution}, max_x={self.max_x}, max_y={self.max_y}')
@@ -159,6 +187,11 @@ class BaseSolver:
         for pin in self.pins:
             pin['x'] = int(pin['x_int'] / resolution)
             pin['y'] = int(pin['y_int'] / resolution)
+        pin_hot_value_calculate(self.pins, self.max_x, self.max_y)
+        for i in range(len(self.pin_groups)):
+            pin_group = self.pin_groups[i]
+            for pin_index in pin_group:
+                self.pins[pin_index]['pin_group'] = i
         for k, v in self.padstacks.items():
             for kk, vv in v.items():
                 vv['detail_p'] = [math.ceil(d / resolution) for d in vv['detail']]
@@ -178,9 +211,10 @@ class BaseSolver:
         if foundPath:
             foundPath = key_path2path(foundPath)
             key_path = path2key_path(foundPath)
-            update_net_flag(resolution=NET_FLAG_RESOLUTION, net_flags=self.net_flags,
-                            net_flag_details=self.net_flag_details, net_id=net_id, path=foundPath,
-                            old_index=old_index)
+            update_net_flag(resolution=NET_FLAG_RESOLUTION, path=foundPath,
+                            old_index=old_index, obstacle=self.obstacle, line_width=self.line_width,
+                            via_radius=self.via_radius
+                            )
             self.steiner_nets[i]['path'] = key_path
             self.steiner_nets[i]['resolution'] = self.resolution
         self.save_data()
@@ -192,14 +226,14 @@ class BaseSolver:
         self.cross_punish = cross_punish
         t = time.time()
         for i in self.pending_nets:
-            # if i != 17:
+            # if i != 170:
             #     continue
             self.route(i)
         logging.info(f'分辨率为{resolution},惩罚为{cross_punish}的解算完成, 耗时{time.time() - t:.2f}s')
         self.cross_check()
         ...
 
-    def net_group_generate(self, assembly_max=0.1):
+    def net_group_generate0(self, assembly_max=0.1):
         self.net_groups = []
         processed_nets = []
         pending_nets = list(range(len(self.steiner_nets)))
@@ -213,6 +247,35 @@ class BaseSolver:
             processed_nets.extend(nets)
         self.net_groups = sorted(self.net_groups, key=lambda ls: len(ls), reverse=True)
         ...
+
+    def net_group_generate(self):
+        self.net_groups = []
+
+        class NetGroupDict(dict):
+            def __missing__(self, key):
+                self[key] = []
+                return self[key]
+
+        net_group_dict = NetGroupDict()
+        for i in range(len(self.steiner_nets)):
+            net = self.steiner_nets[i]
+            pin1 = net['pins'][0]
+            pin2 = net['pins'][1]
+            pin_group1 = self.pins[pin1]['pin_group']
+            pin_group2 = self.pins[pin2]['pin_group']
+            # 将pin_group1和pin_group2合并成从小到大的tuple
+            if pin_group1 > pin_group2:
+                pin_group1, pin_group2 = pin_group2, pin_group1
+            pin_group = (pin_group1, pin_group2)
+            net_group_dict[pin_group].append(i)
+        for k, v in net_group_dict.items():
+            if len(v) > 1:
+                data = {
+                    'nets': v,
+                    'pin_group': k
+                }
+                self.net_groups.append(data)
+        self.net_groups = sorted(self.net_groups, key=lambda d: len(d['nets']), reverse=True)
 
     def net_group_route(self, net_group_id, **kwargs):
         net_group = self.net_groups[net_group_id]
@@ -228,7 +291,7 @@ class BaseSolver:
         # get cluster center
         center0 = kmeans.cluster_centers_[0]
         center1 = kmeans.cluster_centers_[1]
-        # TODO：计算nets距离center的偏离程度并进行排序
+        # 计算nets距离center的偏离程度并进行排序
         net_shift = []
         for net_id in net_group:
             pin0, pin1 = self.steiner_nets[net_id]['pins'][0], self.steiner_nets[net_id]['pins'][1]
@@ -241,7 +304,7 @@ class BaseSolver:
             net_shift.append((net_id, distance1 + distance2))
         net_shift = sorted(net_shift, key=lambda x: x[1])
 
-        # TODO：根据偏离程度从小到大进行route
+        # 根据偏离程度从小到大进行route
         for net_id, _ in net_shift:
             self.route(net_id, **kwargs)
             self.pending_nets.remove(net_id)
@@ -250,6 +313,7 @@ class BaseSolver:
         # self.resolution_solve(512, 0)
         # self.resolution_solve(128, 10)
         # self.resolution_solve(32, 30)
+        s = time.time()
         self.resolution_solve(8, 100)
         ...
         # if self.cross_check():
@@ -276,6 +340,7 @@ class BaseSolver:
         #     self.route(i, cross_punish=100)
         # self.cross_check()
         # self.resolution_change(1)
+        self.run_time = time.time() - s
         return self.steiner_nets, self.resolution
 
     def cross_check(self):
@@ -283,7 +348,8 @@ class BaseSolver:
         self.generate_net_flag()
         logging.info('检测是否有重叠')
         need_remove = []
-        line_width = int((self.line_width + self.clearance) / self.resolution)
+        no_complete_nets = []
+        line_width = int((self.line_width + self.clearance))
         logging.debug(f'line_width={line_width}')
         for net_id in range(len(self.steiner_nets)):
             net = self.steiner_nets[net_id]
@@ -326,20 +392,50 @@ class BaseSolver:
                     if net_id not in self.pending_nets:
                         logging.debug(f'线{net_id}重叠 加入待完成列表')
                         self.pending_nets.append(net_id)
+            else:
+                logging.debug(f'线{net_id}未完成')
+                if net_id not in self.pending_nets:
+                    self.pending_nets.append(net_id)
+                no_complete_nets.append(net_id)
         logging.debug(f'need_remove={need_remove}')
         for net_id in need_remove:
             if net_id in self.pending_nets:
                 self.pending_nets.remove(net_id)
         logging.info(f'剩余{len(self.pending_nets)}条线未完成 {self.pending_nets[:20]}')
+        if len(no_complete_nets) > 0:
+            logging.warning(f'未完成的线数量：{len(no_complete_nets)} {no_complete_nets}')
+            return False
         if len(self.pending_nets) == 0:
             logging.info('所有线完成')
             return True
         else:
             return False
 
+    def running_result(self):
+        # 统计 线路长度 VIA数量 连通率 运行时间 设计规则违例
+        data = {
+            '线路长度': 0,
+            'VIA数量': 0,
+            '连通率': 0,
+            '运行时间': self.run_time,
+            '设计规则违例': -1,
+        }
+        未完成的线数量 = 0
+        for net in self.steiner_nets:
+            if net.get('path'):
+                path = net['path']
+                for i in range(1, len(path)):
+                    data['线路长度'] += math.hypot(path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2])
+                    if path[i][0] != path[i - 1][0]:
+                        data['VIA数量'] += 1
+            else:
+                未完成的线数量 += 1
+        data['连通率'] = (len(self.steiner_nets) - 未完成的线数量) / len(self.steiner_nets)
+        return data
+
     def cross_relation_generate(self):
         self.cross_relation[:] = False
-        line_width = int((self.line_width + self.clearance) / self.resolution)
+        line_width = int((self.line_width + self.clearance))
         for net_id in range(len(self.steiner_nets)):
             net = self.steiner_nets[net_id]
             old_index = net['old_index']
@@ -371,8 +467,8 @@ class BaseSolver:
 
     def generate_net_flag(self):
         logging.info('生成网线标记')
-        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.max_x / NET_FLAG_RESOLUTION)+1,
-                                   math.ceil(self.max_y / NET_FLAG_RESOLUTION)+1,
+        self.net_flags = np.zeros((self.problem.layer_num, math.ceil(self.max_x / NET_FLAG_RESOLUTION) + 1,
+                                   math.ceil(self.max_y / NET_FLAG_RESOLUTION) + 1,
                                    len(self.nets)), dtype=bool)
         for i in range(len(self.nets)):
             self.net_flag_details[i].clear()
@@ -381,9 +477,9 @@ class BaseSolver:
             if not self.steiner_nets[i].get('path'):
                 continue
             path = key_path2path(self.steiner_nets[i]['path'])
-            update_net_flag(resolution=NET_FLAG_RESOLUTION, net_flags=self.net_flags,
-                            net_flag_details=self.net_flag_details, net_id=old_index, path=path,
-                            old_index=old_index)
+            update_net_flag(resolution=NET_FLAG_RESOLUTION, path=path,
+                            old_index=old_index, obstacle=self.obstacle, line_width=self.line_width,
+                            via_radius=self.via_radius, )
 
     def generate_obstacle(self):
         logging.info('生成障碍物')
@@ -406,7 +502,9 @@ class BaseSolver:
                         delta_x = detail[1]
                         delta_y = detail[2]
                     delta_pos = np.array([delta_x, delta_y], dtype=int)
-
+                    if not self.padstack_range.get(pad_key):
+                        self.padstack_range[pad_key] = {'x_min': -radius, 'x_max': radius, 'y_min': -radius,
+                                                        'y_max': radius}
                     cv2.circle(self.obstacle[layer_id, :, :], tuple_reverse(center + delta_pos), radius,
                                (pin.get('net_id', -2),),
                                -1)  # 填充
@@ -416,6 +514,11 @@ class BaseSolver:
                     for i in range(point_num):
                         pts[i, 1] = center[0] + detail[i * 2 + 1]
                         pts[i, 0] = center[1] + detail[i * 2 + 2]
+                    if not self.padstack_range.get(pad_key):
+                        self.padstack_range[pad_key] = {'x_min': np.min(pts[:, 1]) - center[0],
+                                                        'x_max': np.max(pts[:, 1]) - center[0],
+                                                        'y_min': np.min(pts[:, 0]) - center[1],
+                                                        'y_max': np.max(pts[:, 0]) - center[1]}
                     pts = pts.reshape((-1, 1, 2))
                     cv2.fillPoly(self.obstacle[layer_id, :, :], [pts], color=(pin.get('net_id', -2),))
 
@@ -435,6 +538,25 @@ class BaseSolver:
                     if net not in nets:
                         nets.append(net)
         return nets
+
+    def net_group_display(self, net_group_id):
+        img = self.net_img.copy()
+        w = 1
+
+        def plot_net(net, color):
+            start = self.pins[net['pins'][0]]['y'], self.pins[net['pins'][0]]['x']
+            end = self.pins[net['pins'][1]]['y'], self.pins[net['pins'][1]]['x']
+            cv2.line(img, start, end, color, thickness=w, lineType=cv2.LINE_4)
+            logging.debug(f'划线 {start} {end} {color} {w}')
+
+        nets = self.net_groups[net_group_id]['nets']
+        for net in nets:
+            plot_net(self.steiner_nets[net], (0, 255, 255))
+
+        mat270 = np.rot90(img, 1)
+        file_name = f'img/net{net_group_id}.png'
+        cv2.imwrite(file_name, mat270)
+        logging.info(f'画图结束 保存为{file_name}')
 
     def assemble_net_display(self, net_id):
         assembly_max = 0.1
@@ -526,10 +648,10 @@ class BaseSolver:
         if save_path is None:
             save_path = 'img_layer{layer}.jpg'
         cv2.imwrite(save_path, mat270)
-        logging.info(f'画图结束 保存为img_layer{layer}.jpg')
-            # self.net_display_init()
-            # for i in range(len(self.steiner_nets)):
-            #     self.net_display(i)
+        logging.info(f'画图结束 保存为{save_path}')
+        # self.net_display_init()
+        # for i in range(len(self.steiner_nets)):
+        #     self.net_display(i)
 
     def net_display_init(self):
         self.net_img = np.zeros(((self.max_x + 1), (self.max_y + 1), 3), dtype=np.uint8)
@@ -565,36 +687,112 @@ class BaseSolver:
         return MultiLayerAstar(**kwargs)
 
     def net_route(self, net_id, **kwargs):
-        logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)}')
+        save_path_flag = False
+        test_recommand_area = False
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
+        if self.pins[pin0].get('hot_value', 0) < self.pins[pin1].get('hot_value', 0):
+            pin0, pin1 = pin1, pin0
         ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
+        logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)} {ori_position} to {target_pos}')
 
-        recommend_area = self.generate_recommend_area(net_id) if self.model else None
+        recommend_area = self.generate_recommend_area(net_id, pass_small_net=False) if self.model else None
         # A*算法
+        p = None
+        if save_path_flag and recommend_area is not None:
+            with open(f'data/net_path/net{net_id}_recommend_area.pickle', 'wb') as f:
+                pickle.dump(recommend_area, f)
+        if test_recommand_area and recommend_area is not None:
+            _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
+                                      layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
+                                      end_layers=self.pins[pin1]['layers'],
+                                      line_width=self.line_width, net_id=net_id,
+                                      hx_multi_rate=self.hx_multi_rate,
+                                      jps_search_rate=self.jps_search_rate,
+                                      recommend_area=None,
+                                      speed_test=False,
+                                      obstacle=self.obstacle,
+                                      clearance=self.clearance,
+                                      via_radius=self.via_radius,
+                                      **kwargs)
+            p = mp.Process(target=_route, args=(None, _solver, ori_position, target_pos, net_id))
+            p.start()
         _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
                                   layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
                                   end_layers=self.pins[pin1]['layers'],
-                                  line_width=(self.line_width + self.clearance) / self.resolution, net_id=net_id,
+                                  line_width=self.line_width + self.clearance, net_id=net_id,
                                   hx_multi_rate=self.hx_multi_rate,
                                   jps_search_rate=self.jps_search_rate,
                                   recommend_area=recommend_area,
-                                  speed_test=True,
+                                  speed_test=False,
+                                  obstacle=self.obstacle,
+                                  clearance=self.clearance,
+                                  via_radius=self.via_radius,
                                   **kwargs)
         # TODO：跨层情况下，对平面方向不连续的方向是否可以裁剪
-        _found_path = _solver.astar(ori_position, target_pos)
+        _found_path = _route(recommend_area, _solver, ori_position, target_pos, net_id)
+        if p is not None:
+            p.join()
         if _found_path:
             foundPath = list(_found_path)
+            # save found path to file: "data/net_id_path.pickle"
+
             # 修改第一个点的层
             for layer in self.pins[pin0]['layers']:
                 if layer == foundPath[1][0]:
                     foundPath[0] = (layer, foundPath[0][1], foundPath[0][2])
         else:
             foundPath = None
-
+            logging.warning(f'布线失败 id:{net_id}/{len(self.steiner_nets)}')
+            self.save(f'data/fail_solver/net{net_id}.pickle')
         return foundPath
+
+    def generate_pin_group(self, display=True):
+        pin_groups = pin_group_divide(self.pins)
+        for i in range(len(pin_groups)):
+            data = {
+                'index': i,
+                'pins': pin_groups[i],
+            }
+            minx, miny = Infinite, Infinite
+            maxx, maxy = 0, 0
+            for pin_index in pin_groups[i]:
+                pin_data = self.pins[pin_index]
+                pin_data['pin_group'] = i
+                x, y = pin_data['x'], pin_data['y']
+                padstack_range = self.padstack_range[pin_data['shape']]
+                if x + padstack_range['x_min'] < minx:
+                    minx = x + padstack_range['x_min']
+                if x + padstack_range['x_max'] > maxx:
+                    maxx = x + padstack_range['x_max']
+                if y + padstack_range['y_min'] < miny:
+                    miny = y + padstack_range['y_min']
+                if y + padstack_range['y_max'] > maxy:
+                    maxy = y + padstack_range['y_max']
+            data['range'] = {
+                'x_min': minx - 1,
+                'x_max': maxx + 1,
+                'y_min': miny - 1,
+                'y_max': maxy + 1,
+            }
+            self.pin_groups.append(data)
+            logging.info(f'pin_group {i} {data}')
+        if display:
+            for pin_group in self.pin_groups:
+                base_img = np.zeros(((self.max_x + 1), (self.max_y + 1)), dtype=np.uint8)
+                for pin_index in pin_group['pins']:
+                    pin = self.pins[pin_index]
+                    x, y = pin['x'], pin['y']
+                    base_img[x, y] = 1
+                    # 在base_img上的x，y位置画一个圆, 半径为5，颜色为1，线宽为-1（表示填充）
+                    cv2.circle(base_img, (y, x), 10, 2, -1)
+                # 在base_img上画一个矩形 (minx, miny) (maxx, maxy)
+                miny, minx, maxy, maxx = pin_group['range']['y_min'], pin_group['range']['x_min'], \
+                    pin_group['range']['y_max'], pin_group['range']['x_max']
+                cv2.rectangle(base_img, (miny, minx), (maxy, maxx), 1, 2)
+                self.display(base_img, save_path=f'img/pin_group{pin_group["index"]}.jpg')
 
     def net_refine(self, net_id, **kwargs):  # TODO: 低分辨率映射到高分辨率
         net = self.steiner_nets[net_id]
@@ -727,20 +925,22 @@ class BaseSolver:
         return self
 
     def generate_recommend_area(self, net_id, pass_small_net=False):
+        display_flag = False
         # 检测img下是否有net_id文件夹，没有则创建
-        WIDTH = 384  # 模型需要的边长
+        WIDTH = 640  # 模型需要的边长
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
         ori_position = (self.pins[pin0]['layers'][0], self.pins[pin0]['x'], self.pins[pin0]['y'])
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
         # 如果起始点和终止点欧式距离小于0.1WIDTH则返回None
-        if pass_small_net and math.hypot(ori_position[1] - target_pos[1], ori_position[2] - target_pos[2]) < 40:
+        if pass_small_net and math.hypot(ori_position[1] - target_pos[1],
+                                         ori_position[2] - target_pos[2]) < 0.1 * WIDTH:
             return None
         # 如果起始点和终止点横或纵距离大于384则返回None
         if abs(ori_position[1] - target_pos[1]) > WIDTH or abs(ori_position[2] - target_pos[2]) > WIDTH:
             return None
-        if not os.path.exists(f'img/{net_id}'):
+        if display_flag and not os.path.exists(f'img/{net_id}'):
             os.mkdir(f'img/{net_id}')
         width = self.max_x + 1 if self.max_x > WIDTH else WIDTH
         height = self.max_y + 1 if self.max_y > WIDTH else WIDTH
@@ -750,10 +950,10 @@ class BaseSolver:
         obs_feature_map[np.where(self.obstacle == old_index)] = 0
         feature_map[0] = point_feature_generate(feature_map[0], ori_position, target_pos)
         obs_feature_map_generate(-1, feature_map, self.steiner_nets, add=1, old_index=old_index)
-        for i in range(0, self.layer_num + 1):
-            if i == 0: layers = None
-            else: layers = [i-1]
-            self.display(feature_map[i], save_path=f'img/{net_id}/{i}.png')
+        if display_flag:
+            for i in range(0, self.layer_num + 1):
+                self.display(feature_map[i, :self.max_x + 1, :self.max_y + 1] * (3 if i == 0 else 1),
+                             save_path=f'img/{net_id}/{i}.png')
         # 起始点和终止点的中点
         mid_point = ((ori_position[1] + target_pos[1]) // 2, (ori_position[2] + target_pos[2]) // 2)
         # 如果长或者宽大于384，以中点为中心，将feature_map的长或者宽裁剪到384
@@ -793,8 +993,9 @@ class BaseSolver:
         # pred = (pred - pred.min()) / (pred.max() - pred.min()) if pred.max() - pred.min() > 0 else pred
         # 将结果映射到原坐标系
         recommend_area = np.zeros((self.layer_num, self.max_x + 1, self.max_y + 1), dtype=float)
-        recommend_area[:, x_min:x_max, y_min:y_max] = pred
-        for i in range(self.layer_num):
-            self.display(recommend_area[i], layers=[i], save_path=f'img/{net_id}/pred_{i}.png')
+        recommend_area[:, x_min:x_max, y_min:y_max] = pred[:, :self.max_x + 1, :self.max_y + 1]
+        if display_flag:
+            for i in range(self.layer_num):
+                self.display(recommend_area[i], layers=[i], save_path=f'img/{net_id}/pred_{i}.png')
 
         return recommend_area

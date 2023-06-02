@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import time
 
 import numpy as np
 
@@ -76,7 +77,8 @@ class JPSSolver(AStar):
             self.__setitem__(k, v)
             return v
 
-    def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max,
+    def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max, obstacle, via_radius,
+                 clearance,
                  available_range=None,
                  **kwargs):
         self.goal = None
@@ -86,6 +88,10 @@ class JPSSolver(AStar):
         self.old_index = old_index
         self.start_layers = start_layers
         self.end_layers = end_layers
+        self.obstacle = (obstacle != self.old_index) * (obstacle != -1)
+        self.via_radius = via_radius
+        self.clearance = clearance
+
         self.net_flags = solver.net_flags
         self.net_flag_details = solver.net_flag_details
         self.layer_max = layer_max
@@ -110,11 +116,12 @@ class JPSSolver(AStar):
             pass
         else:
             self.passable_cache[key] = self._is_pass(node_data, vertical_move)
+        # logging.debug(f'is_pass {node_data} {vertical_move} {self.passable_cache[key]}')
         return self.passable_cache[key]
 
     def _is_pass(self, node_data, vertical_move=False):
         (layer, x, y) = node_data
-        log_flag = True
+        log_flag = False
         if self.speed_test:
             log_flag = False
         if layer < 0 or layer >= self.layer_max:
@@ -129,43 +136,17 @@ class JPSSolver(AStar):
         if self.available_range is not None and self.available_range[layer, x, y] == 0:
             if log_flag: logging.debug(f'not available range. {node_data}')
             return False
+        line_clearance = int(self.clearance + self.line_width // 2)
         if vertical_move:
-            for i in range(self.layer_max):
-                if self.solver.obstacle[i, x, y] not in [-1, self.old_index]:
-                    if log_flag: logging.debug(f'vertical_move obstacle. {node_data}')
-                    return False
-        elif self.solver.obstacle[layer, x, y] not in [-1, self.old_index]:
+            if self.obstacle[:, x - self.via_radius:x + self.via_radius + 1,
+               y - self.via_radius:y + self.via_radius + 1].any():
+                if log_flag: logging.debug(f'vertical_move obstacle. {node_data}')
+                return False
+        elif self.obstacle[layer, x - line_clearance:x + line_clearance + 1,
+             y - line_clearance:y + line_clearance + 1].any():
             if log_flag: logging.debug(f'obstacle. {node_data}')
             return False
-        flagx0, flagy0 = int(x / NET_FLAG_RESOLUTION), int(y / NET_FLAG_RESOLUTION)
-        for i in range(9):
-            direction_x = NINE_DIRECTIONS[i][0]
-            direction_y = NINE_DIRECTIONS[i][1]
-            gap = (NET_FLAG_RESOLUTION * 0.5 - self.line_width)
-            if direction_x != 0:
-                if direction_x * (x - (flagx0 + 0.5) * NET_FLAG_RESOLUTION) < gap:
-                    continue
-            if direction_y != 0:
-                if direction_y * (y - (flagy0 + 0.5) * NET_FLAG_RESOLUTION) < gap:
-                    continue
-
-            flagx = flagx0 + direction_x
-            flagy = flagy0 + direction_y
-            if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
-                pass
-            else:
-                for neighbor_net in np.where(self.net_flags[layer, flagx, flagy, :])[0]:
-                    for d in self.net_flag_details[neighbor_net][(layer, flagx, flagy)]:
-                        point = d['point']
-                        layer1, x1, y1 = point
-                        if neighbor_net == self.old_index:
-                            if layer1 == layer and x == x1 and y == y1:
-                                # if log_flag: logging.debug(f'is_pass: 与其他的同线路线相交 {node_data}')
-                                return 2
-                        else:
-                            if layer1 == layer and math.hypot(x1 - x, y1 - y) <= self.line_width:
-                                if log_flag: logging.debug(f'net flag. {node_data}')
-                                return False
+        if log_flag: logging.debug(f'可通过. {node_data}')
         return 1
 
     def heuristic_cost_estimate(self, n1, n2):
@@ -183,7 +164,7 @@ class JPSSolver(AStar):
         # 欧式距离
         (layer1, x1, y1) = n1
         (layer2, x2, y2) = n2
-        layer_distance = 0 if layer1 == layer2 else VIA_COST
+        layer_distance = 0 if layer1 == layer2 else VIA_COST * int(self.line_width)
         gscore = math.hypot(x2 - x1, y2 - y1) + layer_distance
         return gscore
 
@@ -299,7 +280,7 @@ class JPSSolver(AStar):
         return (x0, y0) == (x1, y1)
 
     def jump_node(self, node, prev_node, jump_num=0, jump_max=1e10, **kwargs):
-        debug = False
+        debug = True
         if jump_num > jump_max:
             if kwargs.get('no_max_return_node'):
                 if debug: logging.debug(f'jump_node: jump_max no max return {node}')
@@ -402,7 +383,7 @@ class JPSSolver(AStar):
         if self.is_goal_reached(start, goal):
             return [start]
         jump_max = math.hypot(goal[1] - start[1], goal[2] - start[2]) * self.jps_search_rate
-        jump_max = max(20, int(jump_max))
+        jump_max = max(4 * int(self.line_width), int(jump_max))
         searchNodes = JPSSolver.SearchNodeDict()
         startNode = searchNodes[start] = JPSSolver.SearchNode(
             start, gscore=0.0, fscore=self.heuristic_cost_estimate(start, goal)
@@ -421,7 +402,9 @@ class JPSSolver(AStar):
             current.out_openset = True
             current.closed = True
             neighbors = []
-            for neighbor in self.neighbors(current):
+            current_neighbors = self.neighbors(current)
+            for neighbor in current_neighbors:
+                logging.debug(f'neighbor:{neighbor}')
                 direction = (neighbor[1] - current.data[1], neighbor[2] - current.data[2])
                 jp_pos, jp_data = self.jump_node(neighbor, current.data,
                                                  jump_max=jump_max, jps=None, ori_direction=direction)
@@ -437,24 +420,46 @@ class JPSSolver(AStar):
                 )
                 if tentative_gscore >= jp.gscore:
                     continue
-                jp.came_from = current
-                jp.gscore = tentative_gscore
-                jp.fscore = tentative_gscore + self.heuristic_cost_estimate(
-                    jp.data, goal
+                self.point_check(current, goal, jp, jp_data, jp_pos, neighbor, openSet, tentative_gscore)
+            for neighbor in current_neighbors:
+                if not self.is_pass(neighbor):
+                    logging.debug(f'neighbor is not passable: NG:{neighbor} CURRENT:{current.data}')
+                    continue
+                jp_pos, jp_data = neighbor, {}
+                if jp_pos is None:
+                    logging.debug(f'jump_node is None: NG:{neighbor} CURRENT:{current.data}')
+                    continue
+                if self.save_search_path: neighbors.append(jp_pos)  # use for log
+                jp = searchNodes[jp_pos]
+                if jp.closed:
+                    continue
+                tentative_gscore = current.gscore + self.distance_between(
+                    current.data, jp.data
                 )
-                if self.recommend_area is not None:
-                    jp.fscore = jp.fscore * (1 - 0.2 * self.recommend_area[jp_pos])
-                if jp_data.get('jps'):
-                    jp.jps = jp_data['jps']
-                logging.debug(f'current:{current.data} neighbor:{neighbor} jp:{jp.data} f:{jp.fscore} target:{goal}')
-                if jp.out_openset:
-                    jp.out_openset = False
-                    heappush(openSet, jp)
-                else:
-                    # re-add the node in order to re-sort the heap
-                    openSet.remove(jp)
-                    heappush(openSet, jp)
+                if tentative_gscore >= jp.gscore:
+                    continue
+                self.point_check(current, goal, jp, jp_data, jp_pos, neighbor, openSet, tentative_gscore)
             if self.save_search_path:
                 data = {'current': current.data, 'neighbors': neighbors}
                 search_path.append(data)
         return None
+
+    def point_check(self, current, goal, jp, jp_data, jp_pos, neighbor, openSet, tentative_gscore):
+        jp.came_from = current
+        jp.gscore = tentative_gscore
+        jp.fscore = tentative_gscore + self.heuristic_cost_estimate(
+            jp.data, goal
+        )
+        if self.recommend_area is not None:
+            jp.fscore = jp.fscore - self.line_width * VIA_COST * 3 * self.recommend_area[jp_pos]
+        if jp_data.get('jps'):
+            jp.jps = jp_data['jps']
+        logging.debug(f'current:{current.data} neighbor:{neighbor} jp:{jp.data} f:{jp.fscore} target:{goal}')
+        if jp.out_openset:
+            jp.out_openset = False
+            heappush(openSet, jp)
+        else:
+            # re-add the node in order to re-sort the heap
+            openSet.remove(jp)
+            heappush(openSet, jp)
+        logging.debug('point_check')

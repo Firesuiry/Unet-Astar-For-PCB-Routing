@@ -124,7 +124,7 @@ def train_model(model, optimizer, scheduler, device, dataloaders, num_epochs=25)
 def train():
     dataset = MyDataset(r'/data/yinshiyuan/project/pcb/network/dataset/')
     train_set, val_set = dataset.get_train_and_test_Dataset(0.1)
-    batch_size = 8
+    batch_size = 4
 
     dataloaders = {
         'train': DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0),
