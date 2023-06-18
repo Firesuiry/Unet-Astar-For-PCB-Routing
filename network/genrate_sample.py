@@ -53,16 +53,21 @@ def generate_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, sam
         pool.join()
 
 
-def generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, debug=True, load_old=False):
-    save_path = 'network/dataset/' + os.urandom(16).hex() + '/'
+def generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, debug=True, load_old_problem=False,
+                      load_old_solver=False, fixed_name=False):
+    random_str = '0' * 32 if fixed_name else os.urandom(16).hex()
+    save_path = 'network/dataset/' + random_str + '/'
     if not os.path.exists(save_path):
         os.makedirs(save_path)
-    if os.path.exists('problem.pkl') and load_old:
+    if os.path.exists('problem.pkl') and load_old_problem:
         problem = RandomProblem.load('problem.pkl')
-        solver = Solver1.load('solver.pkl')
     else:
         problem = RandomProblem(w_max, w_min, h_max, h_min, l, pin_density, obs_density)
         if debug: problem.save('problem.pkl')
+
+    if os.path.exists('solver.pkl') and load_old_solver:
+        solver = Solver1.load('solver.pkl')
+    else:
         solver = Solver1(problem, speed_test=True, hx_multi_rate=1.35, jps_search_rate=0.2)
         solver.resolution_solve(8, 100)
         if debug: solver.save('solver.pkl')
@@ -71,10 +76,10 @@ def generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, d
     h = problem.max_y
     w = problem.max_x
     generate_data(h, l, nets, problem, w, save_path, solver.obstacle, line_width=solver.line_width,
-                  clearance=solver.clearance, via_radius=solver.via_radius)
+                  clearance=solver.clearance, via_radius=solver.via_radius, search_areas=solver.search_areas)
 
 
-def generate_data(h, l, nets, problem, w, save_path, obstacle, line_width, clearance, via_radius):
+def generate_data(h, l, nets, problem, w, save_path, obstacle, line_width, clearance, via_radius, search_areas):
     # save problem
     problem.save(save_path + 'problem.pkl')
     # save nets
@@ -83,11 +88,13 @@ def generate_data(h, l, nets, problem, w, save_path, obstacle, line_width, clear
     for delete_net_id in range(len(nets)):
         if nets[delete_net_id].get('path') is None:
             continue
+        search_area = search_areas[delete_net_id]
+        np.save(save_path + 'search_area_' + str(delete_net_id) + '.npy', search_area)
         # generate feature map
         feature_map = np.ones((l, w // 8 + 1, h // 8 + 1), dtype=np.uint8)
         feature_map[np.where(obstacle == -1)] = 0
         feature_map[np.where(obstacle == nets[delete_net_id]['old_index'])] = 0
-        obs_feature_map_generate(delete_net_id, feature_map, nets)
+        # obs_feature_map_generate(delete_net_id, feature_map, nets)
         if False:
             for layer in range(l):
                 imwrite('feature_map_' + str(layer) + '.png', feature_map[layer])

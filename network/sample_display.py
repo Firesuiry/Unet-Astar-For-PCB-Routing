@@ -45,19 +45,26 @@ def sample_display(save_path, net_id):
     img_save_path = save_path + f'img/'
     if not os.path.exists(img_save_path):
         os.mkdir(img_save_path)
-    display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map)
+    search_area = np.load(save_path + f'search_area_{net_id}.npy')
+    display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area)
     # save image of feature map
     for i in range(l):
         cv2.imwrite(img_save_path + f'feature_map_{net_id}_{i}.png', feature_map[i] * 255)
 
 
-def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None):
+def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None, search_area=None):
     normal_result = result / np.max(result) * 255 if np.max(result) != 0 else result
     img = np.uint8(normal_result)
     for layer in range(l):
         # imwrite(save_path + 'result_' + str(layer) + '.png', img[layer])
         new_img = cv2.cvtColor(img[layer], cv2.COLOR_GRAY2BGR)
         new_img[feature_map[layer] == 1] = np.array([0, 255, 255])
+        # 画出search_area
+        if search_area is not None:
+            # transposition search_area
+            search_area[layer] = np.transpose(search_area[layer])
+            new_img[search_area[layer]] = 0.5 * new_img[search_area[layer]] + 0.5 * np.array([0, 0, 255])
+
         # 画出path
         for net_id in range(len(nets)):
             path = nets[net_id].get('path')
@@ -85,4 +92,4 @@ if __name__ == '__main__':
                         format='[%(levelname)s]%(asctime)s %(filename)s %(lineno)d %(message)s',
                         datefmt='%Y %b %d %H:%M:%S', )
     for i in range(200):
-        sample_display(R'D:\develop\PCB\network\dataset\71bd47c9d659d9638c596ef5c60b594c', i)
+        sample_display(R'D:\develop\PCB\network\dataset\2daa3b9440438fcac368dfef6f516172', i)

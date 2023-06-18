@@ -100,7 +100,7 @@ def numpy_to_shared_memory(arr, name, data_dict):
 
 def _route(ra, _solver, ori_position, target_pos, net_id, save_path_flag=False):
     s = time.time()
-    _found_path = _solver.astar(ori_position, target_pos)
+    _found_path, search_area = _solver.astar(ori_position, target_pos)
     msg = f'{net_id}布线结束  耗时{time.time() - s:.2f}s ra:{ra is not None}'
     file_name = f'logs/ra0.txt' if ra is None else f'logs/ra1.txt'
     with open(file_name, 'a+', encoding='utf-8') as f:
@@ -109,13 +109,14 @@ def _route(ra, _solver, ori_position, target_pos, net_id, save_path_flag=False):
     if save_path_flag:
         with open(f'data/net_path/net{net_id}_{ra is not None}_found_path.pickle', 'wb') as f:
             pickle.dump(_found_path, f)
-    return _found_path
+    return _found_path, search_area
 
 
 class BaseSolver:
     name = "base_solver"
 
     def __init__(self, problem, **kwargs):
+        self.search_areas = {}
         self.net_groups = None
         self.problem = problem
         self.max_x = self.problem.max_x
@@ -740,7 +741,8 @@ class BaseSolver:
                                   via_radius=self.via_radius,
                                   **kwargs)
         # TODO：跨层情况下，对平面方向不连续的方向是否可以裁剪
-        _found_path = _route(recommend_area, _solver, ori_position, target_pos, net_id)
+        _found_path, search_area = _route(recommend_area, _solver, ori_position, target_pos, net_id)
+        self.search_areas[net_id] = search_area
         if p is not None:
             p.join()
         if _found_path:

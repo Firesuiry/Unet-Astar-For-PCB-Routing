@@ -1,5 +1,6 @@
 import logging
 import math
+from heapq import heappush, heappop
 
 import numpy as np
 
@@ -74,6 +75,8 @@ class MazeSolver(AStar):
         self.viable_cache = {}
         self.speed_test = kwargs.get('speed_test', False)
 
+
+
     def heuristic_cost_estimate(self, n1, n2):
         """computes the 'direct' distance between two (x,y) tuples"""
         (layer1, x1, y1) = n1
@@ -118,7 +121,7 @@ class MazeSolver(AStar):
 
     def _is_pass(self, node, vertical_move=False):
         layer, x, y = node
-        if x < 0 or x >= self.width - 1 or y < 0 or y >= self.height - 1:
+        if x < 0 or x >= self.width or y < 0 or y >= self.height:
             return False
         if not vertical_move:
             line_clearance = self.clearance + self.line_width
@@ -139,7 +142,7 @@ class MazeSolver(AStar):
             for d in DIRECTIONS:
                 for layer in self.start_layers:
                     neighbor = (layer, node.data[1] + d[0], node.data[2] + d[1])
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height:
+                    if self.is_pass(neighbor):
                         neighbors.append(neighbor)
         else:
             # 同层内平移
@@ -158,21 +161,18 @@ class MazeSolver(AStar):
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] + 1))
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] - 1))
                 for neighbor in n_neighbors:
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_pass(neighbor):
+                    if self.is_pass(neighbor):
                         neighbors.append(neighbor)
             else:
                 for d in DIRECTIONS:
                     neighbor = (layer, node.data[1] + d[0], node.data[2] + d[1])
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_pass(neighbor):
+                    if self.is_pass(neighbor):
                         neighbors.append(neighbor)
             # 通孔
-            if (self.solver.obstacle[:, x, y] != -1).any():
-                ...
-            else:
-                for layer in range(self.layer_max):
-                    neighbor = (layer, x, y)
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_viable(neighbor):
-                        neighbors.append(neighbor)
+            for layer in range(self.layer_max):
+                neighbor = (layer, x, y)
+                if self.is_viable(neighbor):
+                    neighbors.append(neighbor)
 
         logging.debug(
             f'ori_pos:{node.data} '
@@ -191,3 +191,50 @@ class MazeSolver(AStar):
         if layer0 not in self.end_layers:
             return False
         return (x0, y0) == (x1, y1)
+
+    def search_area(self, searchNodes):
+        search_area = np.zeros((self.layer_max, self.height + 1, self.width + 1), dtype=bool)
+        for node in searchNodes.values():
+            layer, x, y = node.data
+            search_area[layer, y, x] = True
+        return search_area
+
+    def astar(
+            self, start: T, goal: T, reversePath: bool = False
+    ):
+        if self.is_goal_reached(start, goal):
+            return [start]
+        searchNodes = AStar.SearchNodeDict()
+        startNode = searchNodes[start] = AStar.SearchNode(
+            start, gscore=0.0, fscore=self.heuristic_cost_estimate(start, goal)
+        )
+        openSet: list = []
+        heappush(openSet, startNode)
+        while openSet:
+            current = heappop(openSet)
+            logging.debug(f'current:{current.data} f:{current.fscore}  target:{goal}')
+            if self.is_goal_reached(current.data, goal):
+                return self.reconstruct_path(current, reversePath), self.search_area(searchNodes)
+            current.out_openset = True
+            current.closed = True
+            for neighbor in map(lambda n: searchNodes[n], self.neighbors(current)):
+                if neighbor.closed:
+                    continue
+                tentative_gscore = current.gscore + self.distance_between(
+                    current, neighbor
+                )
+                if tentative_gscore >= neighbor.gscore:
+                    continue
+                neighbor.came_from = current
+                neighbor.gscore = tentative_gscore
+                neighbor.fscore = tentative_gscore + self.heuristic_cost_estimate(
+                    neighbor.data, goal
+                )
+                if neighbor.out_openset:
+                    neighbor.out_openset = False
+                    heappush(openSet, neighbor)
+                else:
+                    # re-add the node in order to re-sort the heap
+                    openSet.remove(neighbor)
+                    heappush(openSet, neighbor)
+        return None
