@@ -110,18 +110,20 @@ class JPSSolver(AStar):
         self.jps_search_rate = kwargs.get('jps_search_rate', 0.1)
         self.recommend_area = kwargs.get('recommend_area', None)
 
+
+
     def is_pass(self, node_data, vertical_move=False):
         key = (node_data, vertical_move)
         if self.passable_cache.__contains__(key):
             pass
         else:
             self.passable_cache[key] = self._is_pass(node_data, vertical_move)
-        # logging.debug(f'is_pass {node_data} {vertical_move} {self.passable_cache[key]}')
+        logging.debug(f'is_pass {node_data} {vertical_move} {self.passable_cache[key]}')
         return self.passable_cache[key]
 
     def _is_pass(self, node_data, vertical_move=False):
         (layer, x, y) = node_data
-        log_flag = False
+        log_flag = True
         if self.speed_test:
             log_flag = False
         if layer < 0 or layer >= self.layer_max:

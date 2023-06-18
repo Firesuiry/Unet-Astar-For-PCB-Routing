@@ -127,8 +127,8 @@ class DsnResolver:
                 elif sub_item.get('width'):
                     self.line_width = float(sub_item['width']) * 10
         self.grid = int(self.grid)
-        self.clearance = int(self.clearance)
-        self.line_width = int(self.line_width)
+        self.clearance = math.ceil(self.clearance)
+        self.line_width = math.ceil(self.line_width)
         ...
 
     def get_connections(self):

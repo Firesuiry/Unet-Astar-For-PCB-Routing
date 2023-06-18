@@ -5,7 +5,7 @@ import logging
 def pin_hot_value_calculate(pins, max_x, max_y):
     logging.info('Calculating pin hot value...')
     # 创建一个二维数组，大小为max_x*max_y
-    pin_hot_value = np.zeros((max_x, max_y))
+    pin_hot_value = np.zeros((max_x+1, max_y+1))
     # 遍历所有的pin，将pin的位置的值加1
     poss = []
     for pin in pins:

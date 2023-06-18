@@ -44,9 +44,15 @@ class MazeSolver(AStar):
     """sample use of the astar algorithm. In this exemple we work on a maze made of ascii characters,
     and a 'node' is just a (x,y) tuple that represents a reachable position"""
 
-    def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max,
+    # def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max, obstacle, via_radius,
+    #              clearance,
+    #              available_range=None,
+    #              **kwargs):
+    def __init__(self, width, height, solver, old_index, start_layers, end_layers, layer_max, obstacle, via_radius,
+                 clearance,
                  available_range=None,
                  **kwargs):
+        self.pass_cache = {}
         self.width = width
         self.height = height
         self.solver = solver
@@ -59,8 +65,14 @@ class MazeSolver(AStar):
         self.available_range = available_range
         self.cross_punish = kwargs.get('cross_punish', 10)
         self.line_width = kwargs.get('line_width', 2.5)
-
+        self.obstacle = (obstacle != self.old_index) * (obstacle != -1)
+        self.via_radius = via_radius
+        self.clearance = clearance
         self.recommend_area = kwargs.get('recommend_area', None)
+
+        self.passable_cache = {}
+        self.viable_cache = {}
+        self.speed_test = kwargs.get('speed_test', False)
 
     def heuristic_cost_estimate(self, n1, n2):
         """computes the 'direct' distance between two (x,y) tuples"""
@@ -79,15 +91,6 @@ class MazeSolver(AStar):
         (layer2, x2, y2) = n2.data
         layer_distance = 0 if layer1 == layer2 else VIA_COST
         gscore = math.hypot(layer_distance, x2 - x1, y2 - y1)
-
-        # 障碍物
-        l = [-1, self.old_index]
-        if self.solver.obstacle[layer2, x2, y2] not in l:
-            gscore += 100
-        # 可行范围
-        if self.available_range is not None and self.available_range[layer2, x2, y2] == 0:
-            gscore += 1000
-
         # 拐弯
         if n1.came_from:
             (layer, x0, y0) = n1.came_from.data
@@ -95,27 +98,36 @@ class MazeSolver(AStar):
                 pass
             else:
                 gscore += 3
-
-        # 交叉
-        min_distance = Infinite
-        flagx0, flagy0 = int(x2 / NET_FLAG_RESOLUTION), int(y2 / NET_FLAG_RESOLUTION)
-        for i in range(9):
-            flagx = flagx0 + NINE_DIRECTIONS[i][0]
-            flagy = flagy0 + NINE_DIRECTIONS[i][1]
-            if flagx < 0 or flagx >= self.net_flags.shape[1] or flagy < 0 or flagy >= self.net_flags.shape[2]:
-                continue
-            for neighbor_net in np.where(self.net_flags[layer2, flagx, flagy, :])[0]:
-                if neighbor_net == self.old_index:
-                    continue
-                for d in self.net_flag_details[neighbor_net][(layer2, flagx, flagy)]:
-                    point = d['point']
-                    distance = math.hypot(x2 - point[1], y2 - point[2])
-                    if distance < min_distance:
-                        min_distance = distance
-        if min_distance < self.line_width:
-            gscore += self.cross_punish * (1 - (abs(min_distance) / self.line_width) ** 0.3)
-
         return gscore
+
+    def is_viable(self, node):
+        layer, x, y = node
+        node_key = (x, y)
+        if self.viable_cache.__contains__(node_key):
+            return self.viable_cache[node_key]
+        else:
+            result = self.is_pass(node, vertical_move=True)
+            self.viable_cache[node_key] = result
+            return result
+
+    def is_pass(self, node, vertical_move=False):
+        key = (node, vertical_move)
+        if key not in self.pass_cache:
+            self.pass_cache[key] = self._is_pass(node, vertical_move)
+        return self.pass_cache[key]
+
+    def _is_pass(self, node, vertical_move=False):
+        layer, x, y = node
+        if x < 0 or x >= self.width - 1 or y < 0 or y >= self.height - 1:
+            return False
+        if not vertical_move:
+            line_clearance = self.clearance + self.line_width
+            return not self.obstacle[layer, x - line_clearance:x + line_clearance + 1,
+                       y - line_clearance:y + line_clearance + 1].any()
+        else:
+            line_clearance = self.via_radius + self.clearance
+            return not self.obstacle[:, x - line_clearance:x + line_clearance + 1,
+                       y - line_clearance:y + line_clearance + 1].any()
 
     def neighbors(self, node):
         """ for a given coordinate in the maze, returns up to 4 adjacent(north,east,south,west)
@@ -146,12 +158,12 @@ class MazeSolver(AStar):
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] + 1))
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] - 1))
                 for neighbor in n_neighbors:
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height:
+                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_pass(neighbor):
                         neighbors.append(neighbor)
             else:
                 for d in DIRECTIONS:
                     neighbor = (layer, node.data[1] + d[0], node.data[2] + d[1])
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height:
+                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_pass(neighbor):
                         neighbors.append(neighbor)
             # 通孔
             if (self.solver.obstacle[:, x, y] != -1).any():
@@ -159,7 +171,7 @@ class MazeSolver(AStar):
             else:
                 for layer in range(self.layer_max):
                     neighbor = (layer, x, y)
-                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height:
+                    if 0 <= neighbor[1] < self.width and 0 <= neighbor[2] < self.height and self.is_viable(neighbor):
                         neighbors.append(neighbor)
 
         logging.debug(

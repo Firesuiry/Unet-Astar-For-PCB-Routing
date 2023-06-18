@@ -125,7 +125,10 @@ class BaseSolver:
         self.clearance = self.problem.clearance
         self.line_width = self.problem.line_width
         self.resolution = 1
-        self.via_radius = self.problem.via_radius
+        if hasattr(self.problem, 'via_radius'):
+            self.via_radius = self.problem.via_radius
+        else:
+            self.problem.via_radius = self.via_radius = 0
         self.pins = copy.deepcopy(self.problem.pins)
         self.padstacks = self.problem.padstacks
         self.padstack_range = {}
@@ -173,12 +176,11 @@ class BaseSolver:
         return f'{self.name}_hx{self.hx_multi_rate}_jps{self.jps_search_rate}'
 
     def resolution_change(self, resolution=1):
-
         old_resolution = self.resolution
         self.resolution = resolution
-        self.line_width = int(self.problem.line_width / resolution)
-        self.clearance = int(self.problem.clearance / resolution)
-        self.via_radius = int(self.problem.via_radius / resolution)
+        self.line_width = math.ceil(self.problem.line_width / resolution)
+        self.clearance = math.ceil(self.problem.clearance / resolution)
+        self.via_radius = math.ceil(self.problem.via_radius / resolution)
         self.max_x = int(self.problem.max_x / resolution)
         self.max_y = int(self.problem.max_y / resolution)
         logging.info(f'分辨率修改为{resolution}, max_x={self.max_x}, max_y={self.max_y}')
@@ -215,6 +217,12 @@ class BaseSolver:
                             old_index=old_index, obstacle=self.obstacle, line_width=self.line_width,
                             via_radius=self.via_radius
                             )
+            # plot self.obstacle and save it to img/obstacle/{net_id}.png
+            img = (self.obstacle.copy() != -1).astype(np.uint8) * 255
+            for layer in range(self.problem.layer_num):
+                cv2.imwrite(f'img/obstacle/{net_id}_{layer}.png', img[layer])
+            # save (self.obstacle.copy() != -1) to img/obstacle/{net_id}.npy
+            np.save(f'img/obstacle/{net_id}.npy', (self.obstacle.copy() != -1).astype(bool))
             self.steiner_nets[i]['path'] = key_path
             self.steiner_nets[i]['resolution'] = self.resolution
         self.save_data()
@@ -314,7 +322,7 @@ class BaseSolver:
         # self.resolution_solve(128, 10)
         # self.resolution_solve(32, 30)
         s = time.time()
-        self.resolution_solve(8, 100)
+        self.resolution_solve(2, 100)
         ...
         # if self.cross_check():
         #     return
@@ -698,7 +706,7 @@ class BaseSolver:
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
         logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)} {ori_position} to {target_pos}')
 
-        recommend_area = self.generate_recommend_area(net_id, pass_small_net=False) if self.model else None
+        recommend_area = self.generate_recommend_area(net_id, pass_small_net=True) if self.model else None
         # A*算法
         p = None
         if save_path_flag and recommend_area is not None:
@@ -722,7 +730,7 @@ class BaseSolver:
         _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
                                   layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
                                   end_layers=self.pins[pin1]['layers'],
-                                  line_width=self.line_width + self.clearance, net_id=net_id,
+                                  line_width=self.line_width, net_id=net_id,
                                   hx_multi_rate=self.hx_multi_rate,
                                   jps_search_rate=self.jps_search_rate,
                                   recommend_area=recommend_area,
@@ -740,9 +748,10 @@ class BaseSolver:
             # save found path to file: "data/net_id_path.pickle"
 
             # 修改第一个点的层
-            for layer in self.pins[pin0]['layers']:
-                if layer == foundPath[1][0]:
-                    foundPath[0] = (layer, foundPath[0][1], foundPath[0][2])
+            if len(foundPath) > 1:
+                for layer in self.pins[pin0]['layers']:
+                    if layer == foundPath[1][0]:
+                        foundPath[0] = (layer, foundPath[0][1], foundPath[0][2])
         else:
             foundPath = None
             logging.warning(f'布线失败 id:{net_id}/{len(self.steiner_nets)}')
@@ -756,27 +765,12 @@ class BaseSolver:
                 'index': i,
                 'pins': pin_groups[i],
             }
-            minx, miny = Infinite, Infinite
-            maxx, maxy = 0, 0
             for pin_index in pin_groups[i]:
                 pin_data = self.pins[pin_index]
                 pin_data['pin_group'] = i
-                x, y = pin_data['x'], pin_data['y']
-                padstack_range = self.padstack_range[pin_data['shape']]
-                if x + padstack_range['x_min'] < minx:
-                    minx = x + padstack_range['x_min']
-                if x + padstack_range['x_max'] > maxx:
-                    maxx = x + padstack_range['x_max']
-                if y + padstack_range['y_min'] < miny:
-                    miny = y + padstack_range['y_min']
-                if y + padstack_range['y_max'] > maxy:
-                    maxy = y + padstack_range['y_max']
-            data['range'] = {
-                'x_min': minx - 1,
-                'x_max': maxx + 1,
-                'y_min': miny - 1,
-                'y_max': maxy + 1,
-            }
+            pin_group = pin_groups[i]
+            boundary = self.get_pin_group_boundary(pin_group)
+            data['range'] = boundary
             self.pin_groups.append(data)
             logging.info(f'pin_group {i} {data}')
         if display:
@@ -793,6 +787,29 @@ class BaseSolver:
                     pin_group['range']['y_max'], pin_group['range']['x_max']
                 cv2.rectangle(base_img, (miny, minx), (maxy, maxx), 1, 2)
                 self.display(base_img, save_path=f'img/pin_group{pin_group["index"]}.jpg')
+
+    def get_pin_group_boundary(self, pin_group):
+        minx, miny = Infinite, Infinite
+        maxx, maxy = 0, 0
+        for pin_index in pin_group:
+            pin_data = self.pins[pin_index]
+            x, y = pin_data['x'], pin_data['y']
+            padstack_range = self.padstack_range[pin_data['shape']]
+            if x + padstack_range['x_min'] < minx:
+                minx = x + padstack_range['x_min']
+            if x + padstack_range['x_max'] > maxx:
+                maxx = x + padstack_range['x_max']
+            if y + padstack_range['y_min'] < miny:
+                miny = y + padstack_range['y_min']
+            if y + padstack_range['y_max'] > maxy:
+                maxy = y + padstack_range['y_max']
+        boundary = {
+            'x_min': minx - 1,
+            'x_max': maxx + 1,
+            'y_min': miny - 1,
+            'y_max': maxy + 1,
+        }
+        return boundary
 
     def net_refine(self, net_id, **kwargs):  # TODO: 低分辨率映射到高分辨率
         net = self.steiner_nets[net_id]

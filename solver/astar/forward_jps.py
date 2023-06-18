@@ -59,6 +59,7 @@ class forwardJPSSolver(JPSSolver):
                 if self.is_goal_reached(w, self.goal):
                     return [w]
             last_wave = wave
+        return last_wave
 
     def jump_node(self, node, prev_node, jump_num=0, jump_max=1e10, **kwargs):
         debug = True
@@ -120,10 +121,13 @@ class forwardJPSSolver(JPSSolver):
             if pre_direction != (0, 0):
                 test_neighbor = (
                     current.data[0], current.data[1] + pre_direction[0], current.data[2] + pre_direction[1])
-                jp_pos, jp_data = self.jump_node(test_neighbor, current.data,
-                                                 jump_max=jump_max, jps=None, ori_direction=pre_direction)
-                if jp_pos is not None:
-                    current_neighbors.append(jp_pos)
+                # jp_pos, jp_data = self.jump_node(test_neighbor, current.data,
+                #                                  jump_max=jump_max, jps=None, ori_direction=pre_direction)
+                # if jp_pos is not None:
+                #     current_neighbors.append(jp_pos)
+                wave = self.wave_node(test_neighbor, current.data, 3)
+                current_neighbors.extend(wave)
+
             for neighbor in current_neighbors:
                 logging.debug(f'neighbor:{neighbor}')
                 jp_pos, jp_data = neighbor, {}

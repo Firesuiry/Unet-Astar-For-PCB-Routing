@@ -11,6 +11,7 @@ from heapq import heappush, heappop
 import json
 import pickle
 
+from solver.solver1 import Solver1
 from utils.np_encoder import NpEncoder
 import multiprocessing as mp
 from network.utils.obs_feature_map_generate import obs_feature_map_generate
@@ -39,14 +40,17 @@ def imwrite(name, img):
 def generate_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, sample_num, debug=True):
     if debug:
         assert sample_num == 1
-    # for i in range(sample_num):
-    #     generate_1_sample(w, h, l, pin_num, debug=False)
-    # multiprocess run
-    pool = mp.Pool(processes=8)
-    for i in range(sample_num):
-        pool.apply_async(generate_1_sample, args=(w_max, w_min, h_max, h_min, l, pin_density, obs_density), kwds={'debug': debug})
-    pool.close()
-    pool.join()
+    if debug:
+        for i in range(sample_num):
+            generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, debug=debug)
+    else:
+        # multiprocess run
+        pool = mp.Pool(processes=8)
+        for i in range(sample_num):
+            pool.apply_async(generate_1_sample, args=(w_max, w_min, h_max, h_min, l, pin_density, obs_density),
+                             kwds={'debug': debug})
+        pool.close()
+        pool.join()
 
 
 def generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, debug=True, load_old=False):
@@ -55,27 +59,30 @@ def generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, d
         os.makedirs(save_path)
     if os.path.exists('problem.pkl') and load_old:
         problem = RandomProblem.load('problem.pkl')
-        solver = JpsSolver.load('solver.pkl')
+        solver = Solver1.load('solver.pkl')
     else:
         problem = RandomProblem(w_max, w_min, h_max, h_min, l, pin_density, obs_density)
         if debug: problem.save('problem.pkl')
-        solver = JpsSolver(problem, speed_test=True, hx_multi_rate=1.35, jps_search_rate=0.2)
+        solver = Solver1(problem, speed_test=True, hx_multi_rate=1.35, jps_search_rate=0.2)
         solver.resolution_solve(8, 100)
         if debug: solver.save('solver.pkl')
     nets = solver.steiner_nets
     # delete_net_id = np.random.randint(0, len(nets))
     h = problem.max_y
     w = problem.max_x
-    generate_data(h, l, nets, problem, w, save_path, solver.obstacle)
+    generate_data(h, l, nets, problem, w, save_path, solver.obstacle, line_width=solver.line_width,
+                  clearance=solver.clearance, via_radius=solver.via_radius)
 
 
-def generate_data(h, l, nets, problem, w, save_path, obstacle):
+def generate_data(h, l, nets, problem, w, save_path, obstacle, line_width, clearance, via_radius):
     # save problem
     problem.save(save_path + 'problem.pkl')
     # save nets
     with open(save_path + 'nets.json', 'w') as f:
         json.dump(nets, f, cls=NpEncoder)
     for delete_net_id in range(len(nets)):
+        if nets[delete_net_id].get('path') is None:
+            continue
         # generate feature map
         feature_map = np.ones((l, w // 8 + 1, h // 8 + 1), dtype=np.uint8)
         feature_map[np.where(obstacle == -1)] = 0
@@ -86,7 +93,7 @@ def generate_data(h, l, nets, problem, w, save_path, obstacle):
                 imwrite('feature_map_' + str(layer) + '.png', feature_map[layer])
         # compress and save feature map
         np.save(save_path + 'feature_map_' + str(delete_net_id) + '.npy', feature_map)
-        solver = LeeSolver2(feature_map)
+        solver = LeeSolver2(feature_map, line_width, clearance, via_radius)
         start_pin = problem.pins[nets[delete_net_id]['pins'][0]]
         start = (0, start_pin['x'] // 8, start_pin['y'] // 8)
         end_pin = problem.pins[nets[delete_net_id]['pins'][1]]
@@ -130,99 +137,13 @@ def display(goal, l, nets, result, start, save_path=''):
         logging.info(save_path + 'result_' + str(layer) + '_with_path.png saved')
 
 
-class LeeSolver:
-
-    def __init__(self, feature_map):
-        self.feature_map = feature_map
-        self.layer_num = feature_map.shape[0]
-        self.width = feature_map.shape[1]
-        self.height = feature_map.shape[2]
-        self.point1_map = np.zeros_like(feature_map, dtype=int) - 1
-        self.point2_map = np.zeros_like(feature_map, dtype=int) - 1
-        self.points_map = [self.point1_map, self.point2_map]
-        self.path_length_map = np.zeros_like(feature_map, dtype=int) - 1
-        self.log_flag = True
-
-    def neighbors(self, point, wave_index, wave_power=-1):
-        layer, x, y = point
-        _neighbors = []
-        neighbors = []
-        for d in DIRECTIONS:
-            new_point = (layer, x + d[0], y + d[1])
-            _neighbors.append(new_point)
-        for l in range(self.layer_num):
-            if l == layer:
-                continue
-            _neighbors.append((l, x, y))
-        for point in _neighbors:
-            if point[1] < 0 or point[1] >= self.width or point[2] < 0 or point[2] >= self.height:
-                continue
-            if self.feature_map[point] != 0:
-                continue
-            if self.points_map[wave_index][point] != wave_power:
-                continue
-            neighbors.append(point)
-        return neighbors
-
-    def back_propagate(self, start_point, wave_index):
-        waves = [start_point]
-        path_length = self.points_map[wave_index][start_point] + self.points_map[1 - wave_index][start_point]
-        current_wave_power = self.points_map[wave_index][start_point]
-        while True:
-            new_wave = []
-            current_wave_power -= 1
-            if current_wave_power < 0:
-                break
-            for point in waves:
-                self.path_length_map[point] = path_length
-                neighbors = self.neighbors(point, wave_index, current_wave_power)
-                for ng in neighbors:
-                    if ng not in new_wave:
-                        new_wave.append(ng)
-            if len(new_wave) == 0:
-                break
-            waves = new_wave
-        return path_length
-
-    def solve(self, start, goal):
-        points = [start, goal]
-        direct_path_length = abs(start[1] - goal[1]) + abs(start[2] - goal[2])
-        current_wave = 0
-        waves = [[start], [goal]]
-        self.points_map[0][start] = 0
-        self.points_map[1][goal] = 0
-        min_path_length = np.inf
-        run_flag = True
-        while run_flag:
-            current_wave += 1
-            for wave_index in range(2):
-                new_wave = []
-                for point in waves[wave_index]:
-                    neighbors = self.neighbors(point, wave_index)
-                    for ng in neighbors:
-                        self.points_map[wave_index][ng] = current_wave
-                        if self.points_map[1 - wave_index][ng] != -1:
-                            # 双方的波都到达了这个点
-                            path_length = self.back_propagate(ng, wave_index)
-                            if path_length < min_path_length:
-                                if self.log_flag: logging.info('path length: ' + str(path_length))
-                                min_path_length = path_length
-                            if path_length > min_path_length + 0.5 * direct_path_length + 1: run_flag = False
-                        if ng not in new_wave: new_wave.append(ng)
-                if len(new_wave) == 0:
-                    if self.log_flag: logging.info('wave empty')
-                    run_flag = False
-                waves[wave_index] = new_wave
-        self.path_length_map[np.where(self.path_length_map == -1)] = 0
-        return self.path_length_map, self.points_map
-
-
 sqrt2 = 2 ** 0.5
 
 
 class LeeSolver2:
 
-    def __init__(self, feature_map):
+    def __init__(self, feature_map, line_width, clearance, via_radius):
+        self.pass_cache = {}
         self.feature_map = feature_map
         self.layer_num = feature_map.shape[0]
         self.width = feature_map.shape[1]
@@ -231,7 +152,30 @@ class LeeSolver2:
         self.point2_map = np.zeros_like(feature_map, dtype=float) - 1
         self.points_map = [self.point1_map, self.point2_map]
         self.path_length_map = np.zeros_like(feature_map, dtype=float) - 1
-        self.log_flag = True
+        self.log_flag = False
+        self.line_width = line_width
+        self.clearance = clearance
+        self.via_radius = via_radius
+        ...
+
+    def is_pass(self, node, vertical_move=False):
+        key = (node, vertical_move)
+        if key not in self.pass_cache:
+            self.pass_cache[key] = self._is_pass(node, vertical_move)
+        return self.pass_cache[key]
+
+    def _is_pass(self, node, vertical_move=False):
+        layer, x, y = node
+        if x < 0 or x >= self.width - 1 or y < 0 or y >= self.height - 1:
+            return False
+        if not vertical_move:
+            line_clearance = self.clearance + self.line_width
+            return not self.feature_map[layer, x - line_clearance:x + line_clearance + 1,
+                       y - line_clearance:y + line_clearance + 1].any()
+        else:
+            line_clearance = self.via_radius + self.clearance
+            return not self.feature_map[:, x - line_clearance:x + line_clearance + 1,
+                       y - line_clearance:y + line_clearance + 1].any()
 
     def distance(self, point1, point2):
         if point1[0] != point2[0]:
@@ -248,16 +192,14 @@ class LeeSolver2:
         neighbors = []
         for d in DIRECTIONS:
             new_point = (layer, x + d[0], y + d[1])
-            _neighbors.append(new_point)
+            if self.is_pass(new_point):
+                _neighbors.append(new_point)
         for l in range(self.layer_num):
             if l == layer:
                 continue
-            _neighbors.append((l, x, y))
+            if self.is_pass((l, x, y), vertical_move=True):
+                _neighbors.append((l, x, y))
         for point in _neighbors:
-            if point[1] < 0 or point[1] >= self.width or point[2] < 0 or point[2] >= self.height:
-                continue
-            if self.feature_map[point] != 0:
-                continue
             neighbors.append(point)
         return neighbors
 
@@ -347,9 +289,9 @@ class LeeSolver2:
                         if path_length < min_path_length:
                             if self.log_flag: logging.info('min path length update: ' + str(path_length))
                             min_path_length = path_length
-                        if explore_flag and path_length > min_path_length + 0.2 * direct_path_length + 1:
+                        if explore_flag and path_length > min_path_length:
                             explore_flag = False
-                        if current_wave > min_path_length * 1.1: run_flag = False
+                        if current_wave > min_path_length: run_flag = False
                     heappush(openset[wave_index], (self.points_map[wave_index][ng], ng))
 
             if len(openset[0]) == 0 and len(openset[1]) == 0:
@@ -365,7 +307,7 @@ if __name__ == '__main__':
                         format='[%(levelname)s]%(asctime)s %(filename)s %(lineno)d %(message)s',
                         datefmt='%Y %b %d %H:%M:%S', )
     # w_max, w_min, h_max, h_min = 2000, 1000, 2000, 1000
-    w_max, w_min, h_max, h_min = 5000, 1000, 5000, 1000
-    # w_max, w_min, h_max, h_min = 1000, 5, 1000, 500
-    l, pin_density, obs_density = 2, 0.28, 0.11
+    # w_max, w_min, h_max, h_min = 5000, 1000, 5000, 1000
+    w_max, w_min, h_max, h_min = 1000, 500, 1000, 500
+    l, pin_density, obs_density = 2, 0.22, 0.11
     generate_1_sample(w_max, w_min, h_max, h_min, l, pin_density, obs_density, debug=True, load_old=False)

@@ -1,16 +1,14 @@
 import numpy as np
 
 
-def pin_group_divide(pins, max_distance=None):
+def pin_group_divide(pins, max_distance=0.15):
     """
     将pin分组，对于组内任意一pin，存在另一个pin与其距离小于max_distance
     :param pins:
     :return:
     """
-
-    if max_distance is None:
-        std = calculate_std(pins)
-        max_distance = std*0.2
+    std = calculate_std(pins)
+    max_distance = std * max_distance
     pin_num = len(pins)
     pin_groups = []
     pin_indexes = list(range(pin_num))
@@ -24,7 +22,36 @@ def pin_group_divide(pins, max_distance=None):
                 if pin in pin_indexes: pin_indexes.remove(pin)
             search_index += 1
         pin_groups.append(pin_group)
-    return pin_groups
+    # 如果输入的pins不是全局pins 更新index
+    new_pin_groups = []
+    for pin_group in pin_groups:
+        new_pin_group = []
+        for pin_index in pin_group:
+            new_pin_group.append(pins[pin_index]['index'])
+        new_pin_groups.append(new_pin_group)
+
+    # 如果一个pin_group完全被另外一个pin_group包含，则将两者合并
+    for i in range(len(new_pin_groups)):
+        x0, x1, y0, y1 = 1e9, 0, 1e9, 0
+        for pin_index in new_pin_groups[i]:
+            pin = pins[pin_index]
+            x0 = min(x0, pin['x'])
+            x1 = max(x1, pin['x'])
+            y0 = min(y0, pin['y'])
+            y1 = max(y1, pin['y'])
+        for j in range(i + 1, len(new_pin_groups)):
+            x0_, x1_, y0_, y1_ = 1e9, 0, 1e9, 0
+            for pin_index in new_pin_groups[j]:
+                pin = pins[pin_index]
+                x0_ = min(x0_, pin['x'])
+                x1_ = max(x1_, pin['x'])
+                y0_ = min(y0_, pin['y'])
+                y1_ = max(y1_, pin['y'])
+            if x0_ >= x0 and x1_ <= x1 and y0_ >= y0 and y1_ <= y1:
+                new_pin_groups[i] += new_pin_groups[j]
+                new_pin_groups[j] = []
+    new_pin_groups = [pin_group for pin_group in new_pin_groups if pin_group != []]
+    return new_pin_groups
 
 
 def find_nearby_pin(pins, pin_index, distance):
