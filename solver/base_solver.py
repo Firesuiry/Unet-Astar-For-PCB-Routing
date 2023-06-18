@@ -219,11 +219,11 @@ class BaseSolver:
                             via_radius=self.via_radius
                             )
             # plot self.obstacle and save it to img/obstacle/{net_id}.png
-            img = (self.obstacle.copy() != -1).astype(np.uint8) * 255
-            for layer in range(self.problem.layer_num):
-                cv2.imwrite(f'img/obstacle/{net_id}_{layer}.png', img[layer])
+            # img = (self.obstacle.copy() != -1).astype(np.uint8) * 255
+            # for layer in range(self.problem.layer_num):
+            #     cv2.imwrite(f'img/obstacle/{net_id}_{layer}.png', img[layer])
             # save (self.obstacle.copy() != -1) to img/obstacle/{net_id}.npy
-            np.save(f'img/obstacle/{net_id}.npy', (self.obstacle.copy() != -1).astype(bool))
+            # np.save(f'img/obstacle/{net_id}.npy', (self.obstacle.copy() != -1).astype(bool))
             self.steiner_nets[i]['path'] = key_path
             self.steiner_nets[i]['resolution'] = self.resolution
         self.save_data()
