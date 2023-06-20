@@ -86,6 +86,8 @@ def generate_data(h, l, nets, problem, w, save_path, obstacle, line_width, clear
     with open(save_path + 'nets.json', 'w') as f:
         json.dump(nets, f, cls=NpEncoder)
     for delete_net_id in range(len(nets)):
+        if delete_net_id < 0.3 * len(nets):
+            continue
         if nets[delete_net_id].get('path') is None:
             continue
         search_area = search_areas[delete_net_id]

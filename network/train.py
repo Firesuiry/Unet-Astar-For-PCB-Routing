@@ -1,4 +1,5 @@
 import copy
+import logging
 import time
 
 from torch import optim
@@ -28,16 +29,16 @@ def dice_loss(pred, target, smooth=1.):
 
 
 def calc_loss(pred, target, metrics, bce_weight=1):
-    bce = F.binary_cross_entropy_with_logits(pred, target)
+    # bce = F.binary_cross_entropy_with_logits(pred, target)
 
     # pred = F.sigmoid(pred)
     pred = torch.sigmoid(pred)
-    # dice = dice_loss(pred, target)
+    dice = dice_loss(pred, target)
 
-    loss = bce * 1
+    loss = dice * 1
 
-    metrics['bce'] += bce.data.cpu().numpy() * target.size(0)
-    # metrics['dice'] += dice.data.cpu().numpy() * target.size(0)
+    # metrics['bce'] += bce.data.cpu().numpy() * target.size(0)
+    metrics['dice'] += dice.data.cpu().numpy() * target.size(0)
     metrics['loss'] += loss.data.cpu().numpy() * target.size(0)
 
     return loss
@@ -121,17 +122,19 @@ def train_model(model, optimizer, scheduler, device, dataloaders, num_epochs=25)
     return model
 
 
-def train():
-    dataset = MyDataset(r'/data/yinshiyuan/project/pcb/network/dataset/')
+def train(dataset_path):
+    logging.info('start training')
+    dataset = MyDataset(dataset_path)
     train_set, val_set = dataset.get_train_and_test_Dataset(0.1)
-    batch_size = 4
+    batch_size = 5
 
     dataloaders = {
         'train': DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0),
         'val': DataLoader(val_set, batch_size=batch_size, shuffle=True, num_workers=0)
     }
 
-    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # device = 'cuda'
     print(device)
 
     num_class = 2

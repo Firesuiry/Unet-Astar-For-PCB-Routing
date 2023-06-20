@@ -4,7 +4,10 @@ import os
 
 import cv2
 import numpy as np
+import torch
 
+from network.data_loader import MyDataset
+from network.unet import ResNetUNet
 from problem import RandomProblem
 
 
@@ -20,7 +23,7 @@ def imwrite(name, img):
         cv2.imwrite('img/' + name, img)
 
 
-def sample_display(save_path, net_id):
+def sample_display(save_path, net_id, dataset, model):
     if save_path[-1] != '/':
         save_path += '/'
     # load data from json
@@ -46,13 +49,24 @@ def sample_display(save_path, net_id):
     if not os.path.exists(img_save_path):
         os.mkdir(img_save_path)
     search_area = np.load(save_path + f'search_area_{net_id}.npy')
-    display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area)
+    data, infer_fm, result0 = dataset.get_item(0, dir_name=save_path, i=net_id)
+    infer_fm = torch.from_numpy(infer_fm).unsqueeze(0).float()
+    infer_fm = infer_fm.to('cuda')
+    with torch.no_grad():
+        pred = model(infer_fm)
+    pred = pred.squeeze(0).cpu().numpy()
+    # 将预测结果通过sigmoid映射到0-1
+    pred = 1 / (1 + np.exp(-pred))
+    pred = pred[:, :feature_map.shape[1], :feature_map.shape[2]]
+    display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area,
+            infer_result=pred)
     # save image of feature map
     for i in range(l):
         cv2.imwrite(img_save_path + f'feature_map_{net_id}_{i}.png', feature_map[i] * 255)
 
 
-def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None, search_area=None):
+def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None, search_area=None,
+            infer_result=None):
     normal_result = result / np.max(result) * 255 if np.max(result) != 0 else result
     img = np.uint8(normal_result)
     for layer in range(l):
@@ -62,9 +76,11 @@ def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_m
         # 画出search_area
         if search_area is not None:
             # transposition search_area
-            search_area[layer] = np.transpose(search_area[layer])
-            new_img[search_area[layer]] = 0.5 * new_img[search_area[layer]] + 0.5 * np.array([0, 0, 255])
-
+            sa = np.transpose(search_area[layer])
+            new_img[sa] = 0.5 * new_img[sa] + 0.5 * np.array([0, 0, 255])
+        if infer_result is not None:
+            new_img[infer_result[layer] > 0.5] = 0.5 * new_img[infer_result[layer] > 0.5] + \
+                                                 0.5 * np.array([0, 255, 0])
         # 画出path
         for net_id in range(len(nets)):
             path = nets[net_id].get('path')
@@ -91,5 +107,10 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='[%(levelname)s]%(asctime)s %(filename)s %(lineno)d %(message)s',
                         datefmt='%Y %b %d %H:%M:%S', )
+    dataset = MyDataset(r'D:\develop\PCB\network\dataset\\', check=False)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = ResNetUNet(2).to(device)
+    model.load_state_dict(torch.load(r'..\\best_val_model.pth', map_location=device))
     for i in range(200):
-        sample_display(R'D:\develop\PCB\network\dataset\2daa3b9440438fcac368dfef6f516172', i)
+        sample_display(R'D:\develop\PCB\network\dataset\1ae9d019d912d9441e5c8a26678a168c', i, dataset=dataset,
+                       model=model)
