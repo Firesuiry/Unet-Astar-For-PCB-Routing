@@ -20,24 +20,20 @@ import torch.nn as nn
 def dice_loss(pred, target, smooth=1.):
     pred = pred.contiguous()
     target = target.contiguous()
-
     intersection = (pred * target).sum(dim=2).sum(dim=2)
-
     loss = (1 - ((2. * intersection + smooth) / (pred.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)))
-
     return loss.mean()
 
 
 def calc_loss(pred, target, metrics, bce_weight=1):
-    # bce = F.binary_cross_entropy_with_logits(pred, target)
+    bce = F.binary_cross_entropy_with_logits(pred, target)
 
-    # pred = F.sigmoid(pred)
     pred = torch.sigmoid(pred)
     dice = dice_loss(pred, target)
 
-    loss = dice * 1
+    loss = bce * 0.5 + dice * 0.5
 
-    # metrics['bce'] += bce.data.cpu().numpy() * target.size(0)
+    metrics['bce'] += bce.data.cpu().numpy() * target.size(0)
     metrics['dice'] += dice.data.cpu().numpy() * target.size(0)
     metrics['loss'] += loss.data.cpu().numpy() * target.size(0)
 
@@ -59,48 +55,37 @@ def train_model(model, optimizer, scheduler, device, dataloaders, num_epochs=25)
     for epoch in range(num_epochs):
         print('Epoch {}/{}'.format(epoch, num_epochs - 1))
         print('-' * 10)
-
         since = time.time()
-
         # Each epoch has a training and validation phase
         for phase in ['train', 'val']:
             if phase == 'train':
-
                 for param_group in optimizer.param_groups:
                     print("LR", param_group['lr'])
-
                 model.train()  # Set model to training mode
             else:
                 model.eval()  # Set model to evaluate mode
-
             metrics = defaultdict(float)
             epoch_samples = 0
             with tqdm(dataloaders[phase], unit="batch") as tepoch:
                 for inputs, labels in tepoch:
                     inputs = inputs.to(device)
                     labels = labels.to(device)
-
                     # zero the parameter gradients
                     optimizer.zero_grad()
-
                     # forward
                     # track history if only in train
                     with torch.set_grad_enabled(phase == 'train'):
                         outputs = model(inputs)
                         loss = calc_loss(outputs, labels, metrics)
-
                         # backward + optimize only if in training phase
                         if phase == 'train':
                             loss.backward()
                             optimizer.step()
                             # scheduler.step()
-
                     # statistics
                     epoch_samples += inputs.size(0)
-
             if phase == 'train':
                 scheduler.step()
-
             print_metrics(metrics, epoch_samples, phase)
             epoch_loss = metrics['loss'] / epoch_samples
 
@@ -124,9 +109,9 @@ def train_model(model, optimizer, scheduler, device, dataloaders, num_epochs=25)
 
 def train(dataset_path):
     logging.info('start training')
-    dataset = MyDataset(dataset_path)
+    dataset = MyDataset(dataset_path, check=False)
     train_set, val_set = dataset.get_train_and_test_Dataset(0.1)
-    batch_size = 5
+    batch_size = 16
 
     dataloaders = {
         'train': DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=0),
@@ -138,7 +123,7 @@ def train(dataset_path):
     print(device)
 
     num_class = 2
-    model = ResNetUNet(num_class).to(device)
+    model = ResNetUNet(in_ch=3, out_ch=2).to(device)
 
     # freeze backbone layers
     # for l in model.base_layers:

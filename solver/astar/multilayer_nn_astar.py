@@ -16,6 +16,13 @@ from solver.astar.multilayer_astar import MazeSolver, VIA_COST
 
 class MazeNNSolver(MazeSolver):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.liner_nn_power = kwargs.get('liner_nn_power', 3)
+        self.multi_nn_power = kwargs.get('multi_nn_power', 3)
+        assert self.liner_nn_power >= 0
+        assert 0 <= self.multi_nn_power <= 1
+
     def astar(
             self, start: T, goal: T, reversePath: bool = False
     ) -> Union[Iterable[T], None]:
@@ -32,7 +39,7 @@ class MazeNNSolver(MazeSolver):
             current = heappop(openSet)
             logging.debug(f'current:{current.data} f:{current.fscore}  target:{goal}')
             if self.is_goal_reached(current.data, goal):
-                return self.reconstruct_path(current, reversePath)
+                return self.reconstruct_path(current, reversePath), self.search_area(searchNodes)
             current.out_openset = True
             current.closed = True
             for neighbor in map(lambda n: searchNodes[n], self.neighbors(current)):
@@ -50,7 +57,8 @@ class MazeNNSolver(MazeSolver):
                 )
                 if self.recommend_area is not None:
                     recommend_score = self.recommend_area[neighbor.data]
-                    neighbor.fscore = neighbor.fscore - self.line_width * VIA_COST * 3 * recommend_score
+                    neighbor.fscore = (neighbor.fscore - self.liner_nn_power * recommend_score) * (
+                            1 - self.multi_nn_power * recommend_score)
                 if neighbor.out_openset:
                     neighbor.out_openset = False
                     heappush(openSet, neighbor)
@@ -58,4 +66,4 @@ class MazeNNSolver(MazeSolver):
                     # re-add the node in order to re-sort the heap
                     openSet.remove(neighbor)
                     heappush(openSet, neighbor)
-        return None
+        return None, None

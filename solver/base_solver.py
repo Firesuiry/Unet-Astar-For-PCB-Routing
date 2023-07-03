@@ -28,6 +28,7 @@ from utils.pin_group_divide import pin_group_divide
 import multiprocessing as mp
 
 from utils.util import pin_hot_value_calculate
+from network.sample_display import display as sample_display
 
 NET_FLAG_RESOLUTION = 10
 Infinite = float("inf")
@@ -101,15 +102,19 @@ def numpy_to_shared_memory(arr, name, data_dict):
 def _route(ra, _solver, ori_position, target_pos, net_id, save_path_flag=False):
     s = time.time()
     _found_path, search_area = _solver.astar(ori_position, target_pos)
-    msg = f'{net_id}布线结束  耗时{time.time() - s:.2f}s ra:{ra is not None}'
-    file_name = f'logs/ra0.txt' if ra is None else f'logs/ra1.txt'
+    use_time = time.time() - s
+    msg = f'{net_id}布线结束  耗时{use_time:.2f}s 展开：{np.sum(search_area)} NN:{ra is not None}'
+    # file_name = f'logs/ra0.txt' if ra is None else f'logs/ra1.txt'
+    file_name = f'logs/ra.txt'
     with open(file_name, 'a+', encoding='utf-8') as f:
         f.write(datetime.now().strftime("%Y-%m-%d-%H-%M-%S|") + msg + '\n')
     logging.info(msg)
     if save_path_flag:
         with open(f'data/net_path/net{net_id}_{ra is not None}_found_path.pickle', 'wb') as f:
             pickle.dump(_found_path, f)
-    return _found_path, search_area
+    if _found_path is not None:
+        _found_path = list(_found_path)
+    return _found_path, search_area, use_time
 
 
 class BaseSolver:
@@ -166,12 +171,19 @@ class BaseSolver:
         self.jps_search_rate = kwargs.get('jps_search_rate', 0.1)
         self.model = None
         self.device = None
+        if kwargs.get('model', None):
+            self.model = kwargs['model']
+            self.device = next(self.model.parameters()).device
+            logging.info(f'load model to device {self.device}')
         if kwargs.get('model_path', None):
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            self.model = ResNetUNet(2).to(self.device)
+            self.model = ResNetUNet(3, 2).to(self.device)
             self.model.load_state_dict(torch.load(kwargs['model_path'], map_location=self.device))
+            self.model = torch.load(kwargs['model_path'])
+            logging.info(f'load model to device {self.device}')
         # self.resolution_change(2)
         self.pin_groups = []
+        self.route_details = {}
 
     def get_name(self):
         return f'{self.name}_hx{self.hx_multi_rate}_jps{self.jps_search_rate}'
@@ -323,7 +335,7 @@ class BaseSolver:
         # self.resolution_solve(128, 10)
         # self.resolution_solve(32, 30)
         s = time.time()
-        self.resolution_solve(2, 100)
+        self.resolution_solve(8, 100)
         ...
         # if self.cross_check():
         #     return
@@ -428,19 +440,33 @@ class BaseSolver:
             '连通率': 0,
             '运行时间': self.run_time,
             '设计规则违例': -1,
+            '详细运行监控': self.route_details,
         }
-        未完成的线数量 = 0
-        for net in self.steiner_nets:
-            if net.get('path'):
-                path = net['path']
-                for i in range(1, len(path)):
-                    data['线路长度'] += math.hypot(path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2])
-                    if path[i][0] != path[i - 1][0]:
-                        data['VIA数量'] += 1
-            else:
-                未完成的线数量 += 1
+        paths = [net.get('path') for net in self.steiner_nets]
+        VIA数量, 未完成的线数量, 线路长度 = self.path_statistic(paths)
+        data['线路长度'] = 线路长度
+        data['VIA数量'] = VIA数量
         data['连通率'] = (len(self.steiner_nets) - 未完成的线数量) / len(self.steiner_nets)
+        paths = [detail['new_path'] for detail in self.route_details.values()]
+        VIA数量, 未完成的线数量, 线路长度 = self.path_statistic(paths)
+        data['新线路长度'] = 线路长度
+        data['新VIA数量'] = VIA数量
+        data['新连通率'] = (len(self.steiner_nets) - 未完成的线数量) / len(self.steiner_nets)
         return data
+
+    def path_statistic(self, paths):
+        未完成的线数量 = 0
+        VIA数量 = 0
+        线路长度 = 0
+        for path in paths:
+            if path is None:
+                未完成的线数量 += 1
+                continue
+            for i in range(1, len(path)):
+                线路长度 += math.hypot(path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2])
+                if path[i][0] != path[i - 1][0]:
+                    VIA数量 += 1
+        return VIA数量, 未完成的线数量, 线路长度
 
     def cross_relation_generate(self):
         self.cross_relation[:] = False
@@ -697,7 +723,8 @@ class BaseSolver:
 
     def net_route(self, net_id, **kwargs):
         save_path_flag = False
-        test_recommand_area = False
+        test_recommand_area = True
+        display_flag = False
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
@@ -707,12 +734,36 @@ class BaseSolver:
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
         logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)} {ori_position} to {target_pos}')
 
-        recommend_area = self.generate_recommend_area(net_id, pass_small_net=True) if self.model else None
+        recommend_area, obs_feature_map = self.generate_recommend_area(net_id,
+                                                                       pass_small_net=False) if self.model else None
         # A*算法
-        p = None
         if save_path_flag and recommend_area is not None:
             with open(f'data/net_path/net{net_id}_recommend_area.pickle', 'wb') as f:
                 pickle.dump(recommend_area, f)
+        self.route_details[net_id] = {}
+        _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
+                                  layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
+                                  end_layers=self.pins[pin1]['layers'],
+                                  line_width=self.line_width, net_id=net_id,
+                                  hx_multi_rate=self.hx_multi_rate,
+                                  jps_search_rate=self.jps_search_rate,
+                                  recommend_area=recommend_area,
+                                  speed_test=False,
+                                  obstacle=self.obstacle,
+                                  clearance=self.clearance,
+                                  via_radius=self.via_radius,
+                                  **kwargs)
+        _found_path, search_area, usetime = _route(recommend_area, _solver, ori_position, target_pos, net_id)
+        if recommend_area is None:
+            self.route_details[net_id]['ori_search_area'] = search_area
+            self.route_details[net_id]['ori_usetime'] = usetime
+            self.route_details[net_id]['ori_search_area'] = np.sum(search_area)
+            self.route_details[net_id]['ori_path'] = _found_path
+        self.route_details[net_id]['new_search_area'] = search_area
+        self.route_details[net_id]['new_usetime'] = usetime
+        self.route_details[net_id]['new_search_area'] = np.sum(search_area)
+        self.route_details[net_id]['new_path'] = _found_path
+
         if test_recommand_area and recommend_area is not None:
             _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
                                       layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
@@ -726,38 +777,34 @@ class BaseSolver:
                                       clearance=self.clearance,
                                       via_radius=self.via_radius,
                                       **kwargs)
-            p = mp.Process(target=_route, args=(None, _solver, ori_position, target_pos, net_id))
-            p.start()
-        _solver = self.get_solver(width=self.max_x, height=self.max_y, solver=self, old_index=old_index,
-                                  layer_max=self.layer_num, start_layers=self.pins[pin0]['layers'],
-                                  end_layers=self.pins[pin1]['layers'],
-                                  line_width=self.line_width, net_id=net_id,
-                                  hx_multi_rate=self.hx_multi_rate,
-                                  jps_search_rate=self.jps_search_rate,
-                                  recommend_area=recommend_area,
-                                  speed_test=False,
-                                  obstacle=self.obstacle,
-                                  clearance=self.clearance,
-                                  via_radius=self.via_radius,
-                                  **kwargs)
-        # TODO：跨层情况下，对平面方向不连续的方向是否可以裁剪
-        _found_path, search_area = _route(recommend_area, _solver, ori_position, target_pos, net_id)
+            _found_path, search_area, usetime = _route(None, _solver, ori_position, target_pos, net_id)
+            self.route_details[net_id]['ori_search_area'] = search_area
+            self.route_details[net_id]['ori_usetime'] = usetime
+            self.route_details[net_id]['ori_search_area'] = np.sum(search_area)
+            self.route_details[net_id]['ori_path'] = _found_path
         self.search_areas[net_id] = search_area
-        if p is not None:
-            p.join()
+        _found_path = self.route_details[net_id]['new_path']
         if _found_path:
             foundPath = list(_found_path)
-            # save found path to file: "data/net_id_path.pickle"
-
             # 修改第一个点的层
             if len(foundPath) > 1:
                 for layer in self.pins[pin0]['layers']:
                     if layer == foundPath[1][0]:
                         foundPath[0] = (layer, foundPath[0][1], foundPath[0][2])
+            if display_flag and recommend_area is not None:
+                l, w, h = self.layer_num, self.max_x, self.max_y
+                feature_map = np.ones((l, w + 1, h + 1), dtype=np.uint8)
+                feature_map[np.where(self.obstacle == -1)] = 0
+                feature_map[np.where(self.obstacle == self.nets[net_id]['old_index'])] = 0
+                sample_display(target_pos, self.layer_num, self.nets, recommend_area, ori_position, net_id,
+                               f'img\\pred\\{net_id}\\',
+                               feature_map=feature_map, search_area=search_area,
+                               infer_result=None, net_path=foundPath)
         else:
             foundPath = None
             logging.warning(f'布线失败 id:{net_id}/{len(self.steiner_nets)}')
-            self.save(f'data/fail_solver/net{net_id}.pickle')
+            if False:
+                self.save(f'data/fail_solver/net{net_id}.pickle')
         return foundPath
 
     def generate_pin_group(self, display=True):
@@ -945,8 +992,9 @@ class BaseSolver:
 
     def generate_recommend_area(self, net_id, pass_small_net=False):
         display_flag = False
+        test_flag = True
         # 检测img下是否有net_id文件夹，没有则创建
-        WIDTH = 640  # 模型需要的边长
+        WIDTH = 256  # 模型需要的边长
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
@@ -955,12 +1003,12 @@ class BaseSolver:
         # 如果起始点和终止点欧式距离小于0.1WIDTH则返回None
         if pass_small_net and math.hypot(ori_position[1] - target_pos[1],
                                          ori_position[2] - target_pos[2]) < 0.1 * WIDTH:
-            return None
+            return None, None
         # 如果起始点和终止点横或纵距离大于384则返回None
         if abs(ori_position[1] - target_pos[1]) > WIDTH or abs(ori_position[2] - target_pos[2]) > WIDTH:
-            return None
-        if display_flag and not os.path.exists(f'img/{net_id}'):
-            os.mkdir(f'img/{net_id}')
+            return None, None
+        if display_flag and not os.path.exists(f'img/pred/{net_id}'):
+            os.mkdir(f'img/pred/{net_id}')
         width = self.max_x + 1 if self.max_x > WIDTH else WIDTH
         height = self.max_y + 1 if self.max_y > WIDTH else WIDTH
         feature_map = np.ones((self.layer_num + 1, width, height), dtype=float)
@@ -968,11 +1016,11 @@ class BaseSolver:
         obs_feature_map[np.where(self.obstacle == -1)] = 0
         obs_feature_map[np.where(self.obstacle == old_index)] = 0
         feature_map[0] = point_feature_generate(feature_map[0], ori_position, target_pos)
-        obs_feature_map_generate(-1, feature_map, self.steiner_nets, add=1, old_index=old_index)
+        # obs_feature_map_generate(-1, feature_map, self.steiner_nets, add=1, old_index=old_index)
         if display_flag:
             for i in range(0, self.layer_num + 1):
                 self.display(feature_map[i, :self.max_x + 1, :self.max_y + 1] * (3 if i == 0 else 1),
-                             save_path=f'img/{net_id}/{i}.png')
+                             save_path=f'img/pred/{net_id}/{i}.png')
         # 起始点和终止点的中点
         mid_point = ((ori_position[1] + target_pos[1]) // 2, (ori_position[2] + target_pos[2]) // 2)
         # 如果长或者宽大于384，以中点为中心，将feature_map的长或者宽裁剪到384
@@ -1000,6 +1048,10 @@ class BaseSolver:
             feature_map = feature_map[:, :, y_min:y_max]
         assert feature_map.shape == (self.layer_num + 1, WIDTH, WIDTH)
         # 将feature_map送入模型进行预测
+        if display_flag:
+            for i in range(0, self.layer_num + 1):
+                cv2.imwrite(f'img/pred/{net_id}/{i}o.png',
+                            (feature_map[i] * 255).astype(np.uint8))
         feature_map = torch.from_numpy(feature_map).unsqueeze(0).float()
         feature_map = feature_map.to(self.device)
         with torch.no_grad():
@@ -1009,12 +1061,19 @@ class BaseSolver:
         pred = pred.squeeze(0).cpu().numpy()
         # 将预测结果通过sigmoid映射到0-1
         pred = 1 / (1 + np.exp(-pred))
-        # pred = (pred - pred.min()) / (pred.max() - pred.min()) if pred.max() - pred.min() > 0 else pred
+        if test_flag and np.min(pred) == np.max(pred):
+            # save feature_map
+            feature_map = feature_map.squeeze(0).cpu().numpy()
+            np.save(f'network/data/test/feature_map{net_id}.npy', feature_map)
+            assert False, f'net {net_id} pred all 0 save feature_map to network/data/test/feature_map{net_id}.npy'
+        if display_flag:
+            for i in range(self.layer_num):
+                cv2.imwrite(f'img/pred/{net_id}/pred_{i}o.png',
+                            (pred[i] * 255).astype(np.uint8))
         # 将结果映射到原坐标系
         recommend_area = np.zeros((self.layer_num, self.max_x + 1, self.max_y + 1), dtype=float)
         recommend_area[:, x_min:x_max, y_min:y_max] = pred[:, :self.max_x + 1, :self.max_y + 1]
         if display_flag:
             for i in range(self.layer_num):
-                self.display(recommend_area[i], layers=[i], save_path=f'img/{net_id}/pred_{i}.png')
-
-        return recommend_area
+                self.display(recommend_area[i], layers=[i], save_path=f'img/pred/{net_id}/pred_{i}.png')
+        return recommend_area, None

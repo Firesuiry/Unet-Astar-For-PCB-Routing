@@ -6,3 +6,4 @@ torchvision
 torch
 scikit-learn
 tqdm
+pandas

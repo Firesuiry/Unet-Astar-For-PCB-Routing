@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.INFO,
                     datefmt='%Y %b %d %H:%M:%S', )
 logging.info('开始处理')
 
+
 def test_generate_sample():
     w_max = w_min = h_max = h_min = 2000
     l, pin_density, obs_density = 2, 0.15, 0.1
@@ -18,6 +19,8 @@ def test_generate_sample():
                       fixed_name=True, load_old_solver=False)
     for i in range(200):
         sample_display(R'D:\develop\PCB\network\dataset\00000000000000000000000000000000', i)
+
+
 
 if __name__ == '__main__':
     shm = shared_memory.SharedMemory(create=True, size=2 ** 30, name='solver_data')

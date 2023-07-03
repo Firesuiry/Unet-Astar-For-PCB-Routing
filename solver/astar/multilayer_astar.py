@@ -75,8 +75,6 @@ class MazeSolver(AStar):
         self.viable_cache = {}
         self.speed_test = kwargs.get('speed_test', False)
 
-
-
     def heuristic_cost_estimate(self, n1, n2):
         """computes the 'direct' distance between two (x,y) tuples"""
         (layer1, x1, y1) = n1
@@ -101,6 +99,8 @@ class MazeSolver(AStar):
                 pass
             else:
                 gscore += 3
+        if not self.is_pass(n2.data, vertical_move=layer1 != layer2):
+            gscore += 5000
         return gscore
 
     def is_viable(self, node):
@@ -142,8 +142,7 @@ class MazeSolver(AStar):
             for d in DIRECTIONS:
                 for layer in self.start_layers:
                     neighbor = (layer, node.data[1] + d[0], node.data[2] + d[1])
-                    if self.is_pass(neighbor):
-                        neighbors.append(neighbor)
+                    neighbors.append(neighbor)
         else:
             # 同层内平移
             layer, x, y = node.data
@@ -161,18 +160,22 @@ class MazeSolver(AStar):
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] + 1))
                         n_neighbors.append((layer, node.data[1] + direction[0], node.data[2] - 1))
                 for neighbor in n_neighbors:
-                    if self.is_pass(neighbor):
-                        neighbors.append(neighbor)
+                    neighbors.append(neighbor)
             else:
                 for d in DIRECTIONS:
                     neighbor = (layer, node.data[1] + d[0], node.data[2] + d[1])
-                    if self.is_pass(neighbor):
-                        neighbors.append(neighbor)
+                    neighbors.append(neighbor)
             # 通孔
             for layer in range(self.layer_max):
                 neighbor = (layer, x, y)
-                if self.is_viable(neighbor):
-                    neighbors.append(neighbor)
+                neighbors.append(neighbor)
+
+        nns = []
+        for neighbor in neighbors:
+            (layer, x, y) = neighbor
+            if 0 <= x < self.width and 0 <= y < self.height:
+                nns.append(neighbor)
+        neighbors = nns
 
         logging.debug(
             f'ori_pos:{node.data} '

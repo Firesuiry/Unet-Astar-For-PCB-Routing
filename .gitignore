@@ -12,3 +12,4 @@ __pycache__
 log.txt
 *.pth
 *.npy
+*.csv

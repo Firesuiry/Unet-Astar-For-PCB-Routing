@@ -1,9 +1,16 @@
+import os
 import pickle
 from datetime import datetime
 from multiprocessing import shared_memory
+# import multiprocessing as mp
+import torch.multiprocessing as mp
+from pathlib import Path
+
+import torch
 
 from ant_solver import AntSolver
 from dsn_resolve import DsnResolver
+from network.unet import ResNetUNet
 from problem import Problem, RandomProblem
 from solver.astar_nn_solver import AstarNNSolver
 from solver.foward_jps_solver import ForwardJPSSolver
@@ -54,28 +61,57 @@ def compare():
         t = f.read()
     resolver = DsnResolver(t)
     problem = Problem(resolver)
-    problem = pickle.load(open(R'D:\develop\PCB\network\dataset\d84205b3ab56bb5eeaf9729317b8eaa2\problem.pkl', 'rb'))
+    # problem = pickle.load(open(R'D:\dataset\000b4560cc2a244ecd10c87feaa36621\problem.pkl', 'rb'))
     Solvers = [Solver1]
-    Solver = Solver1
+    Solver = AstarNNSolver
     # for Solver in Solvers:
-    for model in ['network/best_val_model.pth', None]:
-        s = time.time()
-        solver = Solver(problem, model_path=model)
-        # solver = Solver(problem, model_path=None, hx_multi_rate=1.35, jps_search_rate=0.4)
-        solver.solve()
-        solver.save_data()
-        log_print(f'{Solver.__name__}花费时间:{time.time() - s:.2f} 运行结果:{solver.running_result()}')
-    # hx_params = [1, 1.35]
-    # jps_params = [0.2]
-    # for hx_param in hx_params:
-    #     for jps_param in jps_params:
-    #         s = time.time()
-    #         solver = JpsSolver(problem, hx_multi_rate=hx_param, jps_search_rate=jps_param, speed_test=True)
-    #         solver.solve()
-    #         solver.save_data()
-    #         log_print(f'JpsSolver hx_param:{hx_param} jps_param:{jps_param} '
-    #                   f'花费时间:{time.time() - s:.2f} 运行结果:{solver.running_result()}')
-    input('按任意键继续...')
+    model_path = 'best_val_model.pth'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cpu')
+    model = ResNetUNet(3, 2).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    # problems_path = Path(r'D:\dataset')
+    # for problem_path in list(problems_path.glob('*'))[:10]:
+    #     problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+    #     liner_nn_power = 800
+    #     save_path = f'data\\nn2\\l{liner_nn_power}-{problem_path.name}.pickle'
+    #     single_run(problem, model, liner_nn_power, 0, skip_percent=0.2, save_path=save_path)
+    # return 0
+    problems_path = Path(r'Z:\\')
+    root_save_path = f'data\\nn2'
+    if not os.path.exists(root_save_path):
+        os.makedirs(root_save_path)
+    pool = mp.Pool(8)
+    for liner_nn_power in [800, 200, 400, 100, 1600, 0]:  # [100, 200, 300, 400, 500, 600, 700]:
+        for problem_path in list(problems_path.glob('*'))[:20]:
+            problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+            print(problem_path.name)
+            save_path = f'{root_save_path}\\l{liner_nn_power}-{problem_path.name}.pickle'
+            pool.apply_async(single_run, args=(problem, model, liner_nn_power, 0, save_path, 0.2))
+    pool.close()
+    pool.join()
+
+
+def single_run(problem, model, liner_nn_power, multi_nn_power, save_path=None, skip_percent=0.0):
+    if save_path is None: save_path = f'data\\nn\\l{liner_nn_power}-m{multi_nn_power}.pickle'
+    if os.path.exists(save_path):
+        logging.info(f'l{liner_nn_power}-m{multi_nn_power}已存在')
+        return
+    kwargs = {
+        'model': model,
+        'liner_nn_power': liner_nn_power,
+        'multi_nn_power': multi_nn_power,
+        'skip_percent': skip_percent
+    }
+    solver = AstarNNSolver(problem, **kwargs)
+    solver.solve()
+    solver.save_data()
+    run_result = solver.running_result()
+    # save result
+    with open(save_path, 'wb') as f:
+        pickle.dump(run_result, f)
+    log_print(f'l{liner_nn_power}-m{multi_nn_power}运行结果:{solver.running_result()}')
+    ...
 
 
 def cluster():
@@ -150,6 +186,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='[%(levelname)s]%(asctime)s %(filename)s %(lineno)d %(message)s',
                         datefmt='%Y %b %d %H:%M:%S', )
+    torch.multiprocessing.set_start_method('spawn')
     # solve()
     # cluster()
     # test_problem()
