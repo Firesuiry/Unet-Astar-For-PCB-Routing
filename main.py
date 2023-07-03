@@ -92,6 +92,47 @@ def compare():
     pool.join()
 
 
+def skip_percent_test():
+    model_path = 'best_val_model.pth'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = ResNetUNet(3, 2).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    problems_path = Path(r'Z:\\')
+    root_save_path = f'data\\nn2'
+    if not os.path.exists(root_save_path):
+        os.makedirs(root_save_path)
+    pool = mp.Pool(8)
+    liner_nn_power = 800
+    for skip_percent in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:  # [100, 200, 300, 400, 500, 600, 700]:
+        for problem_path in list(problems_path.glob('*'))[:20]:
+            problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+            print(problem_path.name)
+            save_path = f'{root_save_path}\\s{skip_percent}-{problem_path.name}.pickle'
+            pool.apply_async(single_run, args=(problem, model, liner_nn_power, 0, save_path, skip_percent))
+    pool.close()
+    pool.join()
+
+
+def liner_power_test():
+    model_path = 'best_val_model.pth'
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = ResNetUNet(3, 2).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    problems_path = Path(r'Z:\\')
+    root_save_path = f'data\\nn2'
+    if not os.path.exists(root_save_path):
+        os.makedirs(root_save_path)
+    pool = mp.Pool(8)
+    for liner_nn_power in [800, 200, 400, 100, 1600, 0]:  # [100, 200, 300, 400, 500, 600, 700]:
+        for problem_path in list(problems_path.glob('*'))[:20]:
+            problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+            print(problem_path.name)
+            save_path = f'{root_save_path}\\l{liner_nn_power}-{problem_path.name}.pickle'
+            pool.apply_async(single_run, args=(problem, model, liner_nn_power, 0, save_path, 0.2))
+    pool.close()
+    pool.join()
+
+
 def single_run(problem, model, liner_nn_power, multi_nn_power, save_path=None, skip_percent=0.0):
     if save_path is None: save_path = f'data\\nn\\l{liner_nn_power}-m{multi_nn_power}.pickle'
     if os.path.exists(save_path):
@@ -193,4 +234,4 @@ if __name__ == '__main__':
     # test4()
     # test2()
     # test3()
-    compare()
+    skip_percent_test()

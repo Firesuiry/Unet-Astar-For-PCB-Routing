@@ -30,7 +30,7 @@ class NewDict(dict):
         return self[key]
 
 
-def compare():
+def compare_liner_power():
     p = pathlib.Path('data\\nn2')
     datas_dict = NewDict()
     for file in p.glob('*.pickle'):
@@ -53,8 +53,33 @@ def compare():
             fail_to_save.append(k)
     logging.error(f'fail to save: {fail_to_save}')
 
+def compare_skip_percent():
+    p = pathlib.Path('data\\nn2')
+    datas_dict = NewDict()
+    for file in p.glob('*.pickle'):
+        filename = file.name
+        if filename[0] != 's':
+            continue
+        fn = filename.replace('.pickle', '')
+        # the format of fn is s{skip_percent}-{problem_path.name}.pickle
+        skip_percent = float(fn.split('-')[0][1:])
+        question_id = fn.split('-')[1]
+        new_data = {
+            '问题': question_id
+        }
+        load_data(datas_dict[skip_percent], file, new_data, use_best_skip=False)
+    # save the data as csv
+    fail_to_save = []
+    for k, v in datas_dict.items():
+        try:
+            df = pd.DataFrame(v)
+            df.to_csv(f'data\\nn2\\s{k}.csv', index=False)
+        except:
+            fail_to_save.append(k)
+    logging.error(f'fail to save: {fail_to_save}')
 
-def load_data(datas, file, new_data):
+
+def load_data(datas, file, new_data, use_best_skip=True):
     # load the data
     with open(file, 'rb') as f:
         data = pickle.load(f)
@@ -76,17 +101,18 @@ def load_data(datas, file, new_data):
     ori_search_area = 0
     new_run_time = 0
     new_search_area = 0
-    for net_id in range(net_num):
-        if net_id < 0.25 * net_num:
-            continue
-        v = route_detail[net_id]
-        # {'ori_usetime': -1, 'new_usetime': 0.029946327209472656, 'ori_search_area': 0, 'new_search_area': 723}
-        ori_usetime = v['ori_usetime']
-        new_usetime = v['new_usetime']
-        if new_usetime < ori_usetime:
-            better_percent = net_id / net_num
-            print(f'better_percent: {better_percent}')
-            break
+    if use_best_skip:
+        for net_id in range(net_num):
+            if net_id < 0.25 * net_num:
+                continue
+            v = route_detail[net_id]
+            # {'ori_usetime': -1, 'new_usetime': 0.029946327209472656, 'ori_search_area': 0, 'new_search_area': 723}
+            ori_usetime = v['ori_usetime']
+            new_usetime = v['new_usetime']
+            if new_usetime < ori_usetime:
+                better_percent = net_id / net_num
+                print(f'better_percent: {better_percent}')
+                break
     for net_id in range(net_num):
         if route_detail[net_id]['ori_search_area'] is None:
             continue
@@ -110,5 +136,6 @@ def load_data(datas, file, new_data):
 
 
 if __name__ == '__main__':
-    compare()
+    # compare_liner_power()
+    compare_skip_percent()
 # fine_tune()
