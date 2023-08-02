@@ -70,24 +70,28 @@ def compare():
     # device = torch.device('cpu')
     model = ResNetUNet(3, 2).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
-    # problems_path = Path(r'D:\dataset')
-    # for problem_path in list(problems_path.glob('*'))[:10]:
-    #     problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
-    #     liner_nn_power = 800
-    #     save_path = f'data\\nn2\\l{liner_nn_power}-{problem_path.name}.pickle'
-    #     single_run(problem, model, liner_nn_power, 0, skip_percent=0.2, save_path=save_path)
-    # return 0
+    problems_path = Path(r'D:\dataset')
+    for problem_path in list(problems_path.glob('*'))[15:]:
+        problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+        liner_nn_power = 800
+        save_path = f'data\\nn2\\l{liner_nn_power}-{problem_path.name}.pickle'
+        single_run(problem, model, liner_nn_power, 0, skip_percent=0.3, save_path=save_path)
+        return 0
     problems_path = Path(r'Z:\\')
     root_save_path = f'data\\nn2'
     if not os.path.exists(root_save_path):
         os.makedirs(root_save_path)
-    pool = mp.Pool(8)
-    for liner_nn_power in [800, 200, 400, 100, 1600, 0]:  # [100, 200, 300, 400, 500, 600, 700]:
-        for problem_path in list(problems_path.glob('*'))[:20]:
-            problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
-            print(problem_path.name)
-            save_path = f'{root_save_path}\\l{liner_nn_power}-{problem_path.name}.pickle'
-            pool.apply_async(single_run, args=(problem, model, liner_nn_power, 0, save_path, 0.2))
+    pool = mp.Pool(24)
+    liner_nn_power = 800
+    skip_percent = 0.3
+    for problem_path in list(problems_path.glob('*'))[:200]:
+        problem = pickle.load(open(problem_path / 'problem.pkl', 'rb'))
+        print(problem_path.name)
+        save_path = f'{root_save_path}\\e-{problem_path.name}.pickle'
+        pool.apply_async(single_run, args=(problem, model, liner_nn_power, 0, save_path, 0.2))
+        save_path = f'{root_save_path}\\f-{problem_path.name}.pickle'
+        # single_run(problem, None, liner_nn_power, 0, save_path, 0.2)
+        pool.apply_async(single_run, args=(problem, None, liner_nn_power, 0, save_path, 0.2))
     pool.close()
     pool.join()
 
@@ -234,4 +238,5 @@ if __name__ == '__main__':
     # test4()
     # test2()
     # test3()
-    skip_percent_test()
+    # skip_percent_test()
+    compare()

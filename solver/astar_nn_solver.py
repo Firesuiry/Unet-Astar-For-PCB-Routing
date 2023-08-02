@@ -21,7 +21,7 @@ class AstarNNSolver(BaseSolver):
 
     def generate_recommend_area(self, net_id, pass_small_net=False):
         if net_id / len(self.steiner_nets) < self.skip_percent:
-            return None, None
+            return None
         return super().generate_recommend_area(net_id, pass_small_net)
 
     def running_result(self):

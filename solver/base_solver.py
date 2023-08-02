@@ -724,7 +724,7 @@ class BaseSolver:
     def net_route(self, net_id, **kwargs):
         save_path_flag = False
         test_recommand_area = True
-        display_flag = False
+        display_flag = True
         net = self.steiner_nets[net_id]
         old_index = net['old_index']
         pin0, pin1 = net['pins'][0], net['pins'][1]
@@ -734,8 +734,8 @@ class BaseSolver:
         target_pos = (self.pins[pin1]['layers'][0], self.pins[pin1]['x'], self.pins[pin1]['y'])
         logging.info(f'开始布线 id:{net_id}/{len(self.steiner_nets)} {ori_position} to {target_pos}')
 
-        recommend_area, obs_feature_map = self.generate_recommend_area(net_id,
-                                                                       pass_small_net=False) if self.model else None
+        recommend_area = self.generate_recommend_area(net_id,
+                                                      pass_small_net=False) if self.model else None
         # A*算法
         if save_path_flag and recommend_area is not None:
             with open(f'data/net_path/net{net_id}_recommend_area.pickle', 'wb') as f:
@@ -755,11 +755,11 @@ class BaseSolver:
                                   **kwargs)
         _found_path, search_area, usetime = _route(recommend_area, _solver, ori_position, target_pos, net_id)
         if recommend_area is None:
-            self.route_details[net_id]['ori_search_area'] = search_area
+            self.route_details[net_id]['ori_search_area0'] = search_area
             self.route_details[net_id]['ori_usetime'] = usetime
             self.route_details[net_id]['ori_search_area'] = np.sum(search_area)
             self.route_details[net_id]['ori_path'] = _found_path
-        self.route_details[net_id]['new_search_area'] = search_area
+        self.route_details[net_id]['new_search_area0'] = search_area
         self.route_details[net_id]['new_usetime'] = usetime
         self.route_details[net_id]['new_search_area'] = np.sum(search_area)
         self.route_details[net_id]['new_path'] = _found_path
@@ -778,7 +778,7 @@ class BaseSolver:
                                       via_radius=self.via_radius,
                                       **kwargs)
             _found_path, search_area, usetime = _route(None, _solver, ori_position, target_pos, net_id)
-            self.route_details[net_id]['ori_search_area'] = search_area
+            self.route_details[net_id]['ori_search_area0'] = search_area
             self.route_details[net_id]['ori_usetime'] = usetime
             self.route_details[net_id]['ori_search_area'] = np.sum(search_area)
             self.route_details[net_id]['ori_path'] = _found_path
@@ -797,9 +797,13 @@ class BaseSolver:
                 feature_map[np.where(self.obstacle == -1)] = 0
                 feature_map[np.where(self.obstacle == self.nets[net_id]['old_index'])] = 0
                 sample_display(target_pos, self.layer_num, self.nets, recommend_area, ori_position, net_id,
-                               f'img\\pred\\{net_id}\\',
-                               feature_map=feature_map, search_area=search_area,
+                               f'img\\pred\\{net_id}new\\',
+                               feature_map=feature_map, search_area=self.route_details[net_id]['new_search_area0'],
                                infer_result=None, net_path=foundPath)
+                sample_display(target_pos, self.layer_num, self.nets, recommend_area, ori_position, net_id,
+                               f'img\\pred\\{net_id}old\\',
+                               feature_map=feature_map, search_area=self.route_details[net_id]['ori_search_area0'],
+                               infer_result=None, net_path=list(self.route_details[net_id]['ori_path']))
         else:
             foundPath = None
             logging.warning(f'布线失败 id:{net_id}/{len(self.steiner_nets)}')
@@ -1003,10 +1007,10 @@ class BaseSolver:
         # 如果起始点和终止点欧式距离小于0.1WIDTH则返回None
         if pass_small_net and math.hypot(ori_position[1] - target_pos[1],
                                          ori_position[2] - target_pos[2]) < 0.1 * WIDTH:
-            return None, None
+            return None
         # 如果起始点和终止点横或纵距离大于384则返回None
         if abs(ori_position[1] - target_pos[1]) > WIDTH or abs(ori_position[2] - target_pos[2]) > WIDTH:
-            return None, None
+            return None
         if display_flag and not os.path.exists(f'img/pred/{net_id}'):
             os.mkdir(f'img/pred/{net_id}')
         width = self.max_x + 1 if self.max_x > WIDTH else WIDTH
@@ -1076,4 +1080,4 @@ class BaseSolver:
         if display_flag:
             for i in range(self.layer_num):
                 self.display(recommend_area[i], layers=[i], save_path=f'img/pred/{net_id}/pred_{i}.png')
-        return recommend_area, None
+        return recommend_area

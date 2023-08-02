@@ -78,6 +78,8 @@ def sample_display(save_path, net_id, dataset, model):
 
 def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None, search_area=None,
             infer_result=None, net_path=None):
+    if not os.path.exists(save_path):
+        os.mkdir(save_path)
     normal_result = result / np.max(result) * 255 if np.max(result) != 0 else result
     img = np.uint8(normal_result)
     for layer in range(l):
@@ -130,6 +132,8 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(r'D:\develop\PCB\\best_val_model.pth', map_location=device))
     d1 = R'D:\develop\PCB\network\dataset\1ae9d019d912d9441e5c8a26678a168c'
     d2 = r'D:\dataset\000b4560cc2a244ecd10c87feaa36621'
+    d2 = r'Z:\network\dataset\00a1a9633c8ab583691daf6e66d1eb51'
+    d2 = r'D:\develop\PCB\network\dataset\00000000000000000000000000000000'
     for i in range(0, 100):
         sample_display(d2, i, dataset=dataset,
                        model=model)

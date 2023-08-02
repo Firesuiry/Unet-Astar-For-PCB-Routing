@@ -45,6 +45,8 @@ class MazeNNSolver(MazeSolver):
             for neighbor in map(lambda n: searchNodes[n], self.neighbors(current)):
                 if neighbor.closed:
                     continue
+                if not self.is_pass(neighbor.data):
+                    continue
                 tentative_gscore = current.gscore + self.distance_between(
                     current, neighbor
                 )

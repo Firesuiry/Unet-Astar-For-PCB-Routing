@@ -78,6 +78,23 @@ def compare_skip_percent():
             fail_to_save.append(k)
     logging.error(f'fail to save: {fail_to_save}')
 
+def compare_with_astar(flag='e'):
+    p = pathlib.Path('data\\nn2')
+    datas = []
+    for file in p.glob('*.pickle'):
+        filename = file.name
+        if filename[0] != flag:
+            continue
+        fn = filename.replace('.pickle', '')
+        # the format of fn is s{skip_percent}-{problem_path.name}.pickle
+        question_id = fn.split('-')[1]
+        new_data = {
+            '问题': question_id
+        }
+        load_data(datas, file, new_data, use_best_skip=False)
+    # save the data as csv
+    df = pd.DataFrame(datas)
+    df.to_csv(f'data\\nn2\\{flag}{0}.csv', index=False)
 
 def load_data(datas, file, new_data, use_best_skip=True):
     # load the data
@@ -137,5 +154,7 @@ def load_data(datas, file, new_data, use_best_skip=True):
 
 if __name__ == '__main__':
     # compare_liner_power()
-    compare_skip_percent()
+    # compare_skip_percent()
+    compare_with_astar()
+    compare_with_astar('f')
 # fine_tune()
