@@ -10,6 +10,8 @@ import torch
 from network.data_loader import MyDataset
 from network.unet import ResNetUNet
 from problem import RandomProblem
+from network.unet_ori import UNet as UNet_ori
+from network.unet_pp import UNet_2Plus as UNet_pp
 
 
 def imwrite(name, img):
@@ -24,7 +26,7 @@ def imwrite(name, img):
         cv2.imwrite('img/' + name, img)
 
 
-def sample_display(save_path, net_id, dataset, model):
+def sample_display(save_path, net_id, dataset, model_dict):
     if save_path[-1] != '/':
         save_path += '/'
     # load data from json
@@ -53,31 +55,35 @@ def sample_display(save_path, net_id, dataset, model):
     if os.path.exists(save_path + f'search_area_{net_id}.npy'):
         search_area = np.load(save_path + f'search_area_{net_id}.npy')
     pred = None
-    if model is not None:
-        data, infer_fm, result0 = dataset.get_item(0, dir_name=save_path, i=net_id)
-        for iii in range(infer_fm.shape[0]):
-            cv2.imwrite(img_save_path + f'infer_fm_{net_id}_{iii}.png', (infer_fm[iii] * 255).astype(np.uint8))
-        infer_fm = torch.from_numpy(infer_fm).unsqueeze(0).float()
-        infer_fm = infer_fm.to('cuda')
-        with torch.no_grad():
-            s = time.time()
-            pred = model(infer_fm)
-            print(f'infer time: {time.time() - s}')
-        pred = pred.squeeze(0).cpu().numpy()
-        # 将预测结果通过sigmoid映射到0-1
-        pred = 1 / (1 + np.exp(-pred))
-        pred = pred[:, :feature_map.shape[1], :feature_map.shape[2]]
-        for iii in range(pred.shape[0]):
-            cv2.imwrite(img_save_path + f'infer_pred_{net_id}_{iii}.png', (pred[iii] * 255).astype(np.uint8))
-    display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area,
-            infer_result=pred)
+    if model_dict is not None:
+        for key, model in model_dict.items():
+            data, infer_fm, result0 = dataset.get_item(0, dir_name=save_path, i=net_id)
+            for iii in range(infer_fm.shape[0]):
+                cv2.imwrite(img_save_path + f'infer_fm_{net_id}_{iii}.png', (infer_fm[iii] * 255).astype(np.uint8))
+            infer_fm = torch.from_numpy(infer_fm).unsqueeze(0).float()
+            infer_fm = infer_fm.to('cuda')
+            with torch.no_grad():
+                s = time.time()
+                pred = model(infer_fm)
+                print(f'infer time: {time.time() - s}')
+            pred = pred.squeeze(0).cpu().numpy()
+            # 将预测结果通过sigmoid映射到0-1
+            pred = 1 / (1 + np.exp(-pred))
+            pred = pred[:, :feature_map.shape[1], :feature_map.shape[2]]
+            for iii in range(pred.shape[0]):
+                cv2.imwrite(img_save_path + f'infer_pred_{net_id}_{iii}.png', (pred[iii] * 255).astype(np.uint8))
+            display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area,
+                    infer_result=pred, model_type=key)
+    else:
+        display(goal, l, nets, result, start, net_id, img_save_path, feature_map=feature_map, search_area=search_area,
+                infer_result=pred)
     # save image of feature map
     # for i in range(l):
     #     cv2.imwrite(img_save_path + f'feature_map_{net_id}_{i}.png', feature_map[i] * 255)
 
 
 def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_map=None, search_area=None,
-            infer_result=None, net_path=None):
+            infer_result=None, net_path=None, model_type=''):
     if not os.path.exists(save_path):
         os.mkdir(save_path)
     normal_result = result / np.max(result) * 255 if np.max(result) != 0 else result
@@ -117,7 +123,7 @@ def display(goal, l, nets, result, start, delete_net_id, save_path='', feature_m
 
         if not os.path.exists(save_path):
             os.mkdir(save_path)
-        img_name = save_path + f'result_{delete_net_id}_{layer}_with_path.png'
+        img_name = save_path + f'result_{delete_net_id}_{layer}_with_path_{model_type}.png'
         imwrite(img_name, new_img)
 
 
@@ -128,12 +134,22 @@ if __name__ == '__main__':
     model = dataset = None
     dataset = MyDataset(r'D:\develop\PCB\network\dataset\\', check=False)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = ResNetUNet(in_ch=3, out_ch=2).to(device)
-    model.load_state_dict(torch.load(r'D:\develop\PCB\\best_val_model.pth', map_location=device))
+    model_dict = {}
+    for model_type in ['', 'pp', 'ori']:
+        if model_type == '':
+            model = ResNetUNet(in_ch=3, out_ch=2).to(device)
+        elif model_type == 'ori':
+            model = UNet_ori(n_channels=3, n_classes=2).to(device)
+        elif model_type == 'pp':
+            model = UNet_pp(in_channels=3, n_classes=2).to(device)
+        else:
+            raise Exception('model type error')
+        model_dict[model_type] = model
+        model.load_state_dict(torch.load(f'D:\\develop\\PCB\\{model_type}best_model.pth', map_location=device))
     d1 = R'D:\develop\PCB\network\dataset\1ae9d019d912d9441e5c8a26678a168c'
     d2 = r'D:\dataset\000b4560cc2a244ecd10c87feaa36621'
     d2 = r'Z:\network\dataset\00a1a9633c8ab583691daf6e66d1eb51'
-    d2 = r'D:\develop\PCB\network\dataset\00000000000000000000000000000000'
+    d2 = r'D:\dataset\000b4560cc2a244ecd10c87feaa36621'
     for i in range(0, 100):
         sample_display(d2, i, dataset=dataset,
-                       model=model)
+                       model_dict=model_dict)
